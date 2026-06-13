@@ -1,0 +1,203 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>⚽ 足球比赛预测系统</title>
+<link rel="stylesheet" href="/static/css/style.css?v=2">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="container"><div class="main-wrap"><main style="display:contents">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-left">
+      <div class="header-icon">⚽</div>
+      <div>
+        <h1>足球比赛预测</h1>
+        <div class="header-sub">12 算法 · BMA 融合 · 实时数据</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a href="/" class="btn-ghost active">🔮 预测</a>
+      <a href="/history" class="btn-ghost">📈 历史</a>
+      <button class="btn-ghost" onclick="refreshData()">🔄 刷新</button>
+    </div>
+  </header>
+
+  <!-- STEP 1: TEAM SELECTION -->
+  <div class="card">
+    <div class="card-head">
+      <span class="step">1</span>
+      <h2>选择对阵双方</h2>
+    </div>
+
+    <div class="tabs" id="teamTabBar">
+      <button class="tab active" onclick="switchTeamTab(this,'national')">🏆 国家队</button>
+      <button class="tab" onclick="switchTeamTab(this,'club')">🏟 俱乐部</button>
+      <button class="tab" onclick="switchTeamTab(this,'all')">📋 全部</button>
+    </div>
+
+    <div class="picker-row">
+      <div class="picker team-select-box">
+        <div class="picker-label">🏠 主队</div>
+        <div class="input-wrap">
+          <input type="text" id="homeSearch" class="team-search" placeholder="输入队名搜索..."
+                 oninput="filterTeams('home')" onfocus="filterTeams('home')" autocomplete="off">
+          <span class="input-clear" id="homeClear" style="display:none" onclick="clearTeam('home')" title="清除">✕</span>
+        </div>
+        <div class="dropdown" id="homeDropdown"></div>
+      </div>
+      <div class="vs-circle">VS</div>
+      <div class="picker team-select-box">
+        <div class="picker-label">✈️ 客队</div>
+        <div class="input-wrap">
+          <input type="text" id="awaySearch" class="team-search" placeholder="输入队名搜索..."
+                 oninput="filterTeams('away')" onfocus="filterTeams('away')" autocomplete="off">
+          <span class="input-clear" id="awayClear" style="display:none" onclick="clearTeam('away')" title="清除">✕</span>
+        </div>
+        <div class="dropdown" id="awayDropdown"></div>
+      </div>
+    </div>
+
+    <div class="selected-row" id="selectedTeams" style="display:none">
+      <span class="team-tag home" id="selHome"></span>
+      <span style="color:var(--text-muted);font-weight:700;font-size:.8rem">VS</span>
+      <span class="team-tag away" id="selAway"></span>
+    </div>
+
+    <div class="form-row">
+      <div class="field">
+        <label>联赛</label>
+        <select id="league">{% for l in leagues %}<option value="{{ l }}" {% if '世界杯' in l %}selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+      </div>
+      <div class="field">
+        <label>场地</label>
+        <select id="neutral"><option value="false">主队主场</option><option value="true" selected>中立场地</option></select>
+      </div>
+    </div>
+
+    <button class="btn btn-outline" id="searchBtn" onclick="searchMatches()" disabled>🔍 搜索两队近期比赛</button>
+  </div>
+
+  <!-- STEP 2: MATCH LIST -->
+  <div class="card" id="matchResults" style="display:none">
+    <div class="card-head">
+      <span class="step">2</span>
+      <h2>近期比赛</h2>
+    </div>
+    <div id="matchList"></div>
+  </div>
+
+  <!-- STEP 3: CONFIRM & PREDICT -->
+  <div class="card" id="confirmPanel" style="display:none">
+    <div class="card-head">
+      <span class="step">3</span>
+      <h2>确认 & 预测</h2>
+    </div>
+
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px;padding:10px;border-radius:10px;background:rgba(255,255,255,.02);border:1px dashed var(--border)">
+      <span class="team-tag home" id="confirmHome">-</span>
+      <span style="color:var(--text-muted);font-weight:700">VS</span>
+      <span class="team-tag away" id="confirmAway">-</span>
+    </div>
+
+    <div id="matchInfo" style="display:none;text-align:center;margin-bottom:10px;font-size:.78rem;color:var(--text-dim);padding:6px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)"></div>
+
+    <div class="form-row" style="margin-top:0">
+      <div class="field"><label>主胜赔率</label><input type="number" id="homeOdds" step="0.01" placeholder="如 2.10"></div>
+      <div class="field"><label>平局赔率</label><input type="number" id="drawOdds" step="0.01" placeholder="如 3.30"></div>
+      <div class="field"><label>客胜赔率</label><input type="number" id="awayOdds" step="0.01" placeholder="如 3.80"></div>
+    </div>
+    <div style="font-size:.7rem;color:var(--text-muted);margin:6px 0 0;text-align:center">留空则使用市场先验概率</div>
+
+    <div id="homePlayers" style="margin-top:10px;font-size:.75rem;color:var(--text-dim)"></div>
+    <div id="awayPlayers" style="margin-top:4px;font-size:.75rem;color:var(--text-dim)"></div>
+
+    <div class="progress-track" id="progressTrack" style="display:none;margin-top:12px">
+      <div class="progress-bar" id="progressFill"></div>
+    </div>
+    <div class="progress-text" id="progressText" style="display:none;text-align:center"></div>
+
+    <button class="btn btn-primary" id="runBtn" onclick="runPrediction()">🔮 开始预测</button>
+  </div>
+
+  <!-- RESULT CARD -->
+  <div class="card result-card" id="results" style="display:none">
+    <!-- Scoreboard -->
+    <div class="scoreboard">
+      <span class="team h" id="resHome">-</span>
+      <span class="mid">VS</span>
+      <span class="team a" id="resAway">-</span>
+    </div>
+
+    <!-- Probability blocks -->
+    <div class="prob-row">
+      <div class="prob-block h" id="probHome"><div class="label">主胜</div><div class="val">-</div></div>
+      <div class="prob-block d" id="probDraw"><div class="label">平局</div><div class="val">-</div></div>
+      <div class="prob-block a" id="probAway"><div class="label">客胜</div><div class="val">-</div></div>
+    </div>
+
+    <!-- Extra stats -->
+    <div class="extra-bar">
+      <div class="extra-item"><span class="lbl">预期进球</span><span class="val" id="showGoals">-</span></div>
+      <div class="extra-item"><span class="lbl">置信度</span><span class="val" id="showConf">-</span></div>
+    </div>
+
+        <!-- Charts -->
+    <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px"><canvas id="pieChart" height="200"></canvas></div>
+      <div style="flex:1;min-width:200px"><canvas id="goalsChart" height="200"></canvas></div>
+    </div>
+
+    <!-- HTFT Grid -->
+    <div class="htft-grid" id="htftGrid"></div>
+
+    <!-- Top scores -->
+    <div class="score-row" id="topScores"></div>
+
+    <!-- Over/Under -->
+    <div class="ou-row" id="overUnder"></div>
+
+    <!-- Models table -->
+    <div class="models-wrap">
+    <h3>各模型预测</h3>
+    <table class="model-table" id="modelsTable">
+      <thead><tr><th>模型</th><th>主胜</th><th>平局</th><th>客胜</th><th>进球</th><th>权重</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+    <button class="btn btn-outline" onclick="showDebug()" style="margin-top:16px">📐 查看计算过程</button>
+  </div>
+
+  <!-- DEBUG PANEL -->
+  <div class="card debug" id="debugPanel" style="display:none">
+    <div id="debugContent"></div>
+  </div>
+
+</div>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <span>⚽</span>
+      <h3>近期比赛</h3>
+      <button class="btn-ghost" onclick="loadSidebar()" title="刷新">🔄</button>
+    </div>
+    <div class="sidebar-list" id="sidebarList">
+      <div class="loading-text">加载中...</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+  const NATIONAL_TEAMS = {{ national_teams | tojson }};
+  const CLUB_TEAMS = {{ club_teams | tojson }};
+  const ALL_TEAMS = {{ all_teams | tojson }};
+  const PLAYERS_DATA = {{ players | tojson }};
+</script>
+<script src="/static/js/app.js?v=9"></script>
+</body>
+</html>

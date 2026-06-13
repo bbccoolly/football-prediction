@@ -1,0 +1,14 @@
+﻿__pycache__/
+*.pyc
+*.pyo
+*.log
+server_err*.log
+server_out*.log
+data/processed/
+data/raw/
+ensemble/weights.json
+ensemble/saved_models/
+*.db
+.env
+.DS_Store
+Thumbs.db
