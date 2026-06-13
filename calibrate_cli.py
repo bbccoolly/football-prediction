@@ -50,10 +50,10 @@ def subheader(text):
     print(f"\n  {c(text, Colors.BOLD)}")
 
 # ========== 数据抓取 ==========
-def fetch_openligadb(league="bl1", season="2024"):
+def fetch_openligadb(league="bl1", season="2024", max_md=35):
     matches = []
     print(f"  {c('[OpenLigaDB]', Colors.DIM)} 抓取德甲 {season}...", end=" ", flush=True)
-    for md in range(1, 35):
+    for md in range(1, max_md):
         try:
             r = requests.get(f"https://api.openligadb.de/getmatchdata/{league}/{season}/{md}", headers=HEADERS, timeout=15)
             if r.status_code != 200: continue
@@ -413,7 +413,11 @@ def main():
 
     if not args.quick:
         header("数据抓取")
-        all_matches.extend(fetch_openligadb("bl1", "2024"))
+        for code, name, max_md in [("bl1","德甲",35), ("bl2","德乙",35), ("bl3","德丙",39)]:
+            for season in ["2024", "2023", "2022"]:
+                try:
+                    all_matches.extend(fetch_openligadb(code, season, max_md))
+                except: pass
         all_matches.extend(fetch_500_history(args.days))
 
         # 去重

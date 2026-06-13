@@ -18,9 +18,10 @@ HEADERS = {
 # Step 1: 抓取历史比赛数据
 # ======================================================================
 def fetch_openligadb(league="bl1", season="2024"):
-    """从 OpenLigaDB 抓取德甲历史数据（免费 API）"""
+    """从 OpenLigaDB 抓取历史数据（免费 API，支持德甲/德乙/德丙）"""
     matches = []
-    for matchday in range(1, 35):
+    max_md = 35 if league == "bl1" else (35 if league == "bl2" else 39)
+    for matchday in range(1, max_md):
         try:
             url = f"https://api.openligadb.de/getmatchdata/{league}/{season}/{matchday}"
             r = requests.get(url, headers=HEADERS, timeout=15)
@@ -106,19 +107,25 @@ def collect_all_history():
     """收集所有可用的历史比赛数据"""
     all_matches = []
 
-    # OpenLigaDB 德甲
-    print("[收集] OpenLigaDB 德甲 2024...")
-    bundesliga = fetch_openligadb("bl1", "2024")
-    all_matches.extend(bundesliga)
+    # OpenLigaDB: 德甲 + 德乙 + 德丙, 多赛季
+    for league_code, league_name in [("bl1","德甲"), ("bl2","德乙"), ("bl3","德丙")]:
+        for season in ["2024", "2023", "2022"]:
+            print(f"[收集] OpenLigaDB {league_name} {season}...")
+            try:
+                m = fetch_openligadb(league_code, season)
+                all_matches.extend(m)
+            except Exception as e:
+                print(f"  跳过: {e}")
+            time.sleep(0.5)
 
-    # 500.com 最近几天
+    # 500.com 更长时间范围
     print("[收集] 500.com 近期比赛...")
-    for days_ago in range(1, 8):
+    for days_ago in range(1, 15):
         d = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
         m = fetch_500_history(d)
         if m:
             all_matches.extend(m)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     # 去重
     seen = set()
