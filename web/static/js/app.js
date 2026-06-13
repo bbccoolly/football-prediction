@@ -464,6 +464,26 @@ function renderResults(data) {
         htftGrid.innerHTML = htftHtml;
     }
 
+    
+    // 让球胜负
+    var handicapGrid = document.getElementById("handicapGrid");
+    if (handicapGrid && data.handicap) {
+        var hpHtml = "";
+        for (var label in data.handicap) {
+            if (!data.handicap.hasOwnProperty(label)) continue;
+            var hp = data.handicap[label];
+            var winPct = (hp.win * 100).toFixed(1);
+            var drawPct = hp.draw ? (hp.draw * 100).toFixed(1) : "0.0";
+            var losePct = (hp.lose * 100).toFixed(1);
+            hpHtml += '<div class="handicap-card">';
+            hpHtml += '<div class="hp-spread">' + label + '</div>';
+            hpHtml += '<div class="hp-bars"><div class="hp-win" style="width:' + winPct + '%"></div><div class="hp-draw" style="width:' + drawPct + '%"></div><div class="hp-lose" style="width:' + losePct + '%"></div></div>';
+            hpHtml += '<div class="hp-vals"><span class="w">让胜 ' + winPct + '%</span><span class="d">走水 ' + drawPct + '%</span><span class="l">让负 ' + losePct + '%</span></div>';
+            hpHtml += '</div>';
+        }
+        handicapGrid.innerHTML = hpHtml;
+    }
+
     document.getElementById("results").style.display = "block";
     document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
 }

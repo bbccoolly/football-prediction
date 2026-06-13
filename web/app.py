@@ -301,6 +301,7 @@ def predict():
     predictions["monte_carlo"] = mc_model.simulate(preds_mc, w_mc); report(11,"蒙特卡洛")
     predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral); report(12,"贝叶斯层次")
 
+    handicap_result = poisson_model.predict_handicap(home_team, away_team, neutral)
     blend_result = bma.blend(predictions)
 
     home_probs = [p["home_win"] for p in predictions.values()]
@@ -318,6 +319,7 @@ def predict():
         "predictions":predictions,
         "htft":htft_result,
         "ensemble":blend_result,
+        "handicap":handicap_result,
         "confidence":confidence,
     }))
 
@@ -465,6 +467,9 @@ def api_debug_predict():
     predictions["market_odds"] = market_model.predict()
     predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral)
 
+        # 让球胜负预测
+    handicap = poisson_model.predict_handicap(home_team, away_team, neutral)
+    
     blend = bma.blend(predictions)
 
     debug["model_outputs"] = {k: {

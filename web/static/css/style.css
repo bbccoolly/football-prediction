@@ -292,6 +292,26 @@ body {
 .score-chip .score { font-weight: 700; font-size: .95rem; }
 .score-chip .prob { font-size: .65rem; color: var(--text-dim); }
 
+
+
+/* =======  HANDICAP  ======= */
+.handicap-section { margin-top: 16px; }
+.handicap-section h3 { font-size: .82rem; color: var(--text-dim); margin-bottom: 10px; font-weight: 600; }
+.handicap-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.handicap-card {
+  flex: 1; min-width: 120px; padding: 10px; border-radius: var(--radius-sm);
+  background: var(--bg-input); border: 1px solid var(--border); text-align: center;
+}
+.handicap-card .hp-spread { font-size: .65rem; color: var(--text-muted); margin-bottom: 4px; font-weight: 600; }
+.handicap-card .hp-bars { display: flex; height: 4px; border-radius: 2px; overflow: hidden; gap: 1px; margin: 6px 0; }
+.handicap-card .hp-bars .hp-win { background: var(--green); }
+.handicap-card .hp-bars .hp-draw { background: var(--amber); }
+.handicap-card .hp-bars .hp-lose { background: var(--red); }
+.handicap-card .hp-vals { display: flex; justify-content: space-between; font-size: .65rem; }
+.handicap-card .hp-vals .w { color: var(--green); font-weight: 700; }
+.handicap-card .hp-vals .d { color: var(--amber); font-weight: 600; }
+.handicap-card .hp-vals .l { color: var(--red); font-weight: 600; }
+
 /* =======  MODELS TABLE  ======= */
 .models-wrap { margin-top: 14px; }
 .models-wrap h3 { font-size: .8rem; color: var(--text-dim); margin-bottom: 8px; }

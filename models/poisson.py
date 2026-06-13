@@ -171,6 +171,57 @@ class PoissonModel:
             "top": sorted_htft,
         }
 
+    def predict_handicap(self, home_team: str, away_team: str, neutral: bool = False) -> dict:
+        """预测让球胜负概率（常见盘口）"""
+        atk_h = self.attack_strengths.get(home_team, 1.0)
+        def_h = self.defense_strengths.get(home_team, 1.0)
+        atk_a = self.attack_strengths.get(away_team, 1.0)
+        def_a = self.defense_strengths.get(away_team, 1.0)
+        hf = 1.0 if neutral else 1.15
+
+        lam_h = self._expected_goals(atk_h, def_a, hf)
+        lam_a = self._expected_goals(atk_a, def_h, 1.0 / hf)
+        lam_h = max(0.3, min(3.5, max(0.5, lam_h)))
+        lam_a = max(0.3, min(3.5, max(0.5, lam_a)))
+
+        # 常见让球盘口（从主队视角：负数=主队让球）
+        spreads = [-2.0, -1.5, -1.0, 0, 1.0, 1.5, 2.0]
+        result = {}
+
+        for spread in spreads:
+            win, draw_s, lose = 0.0, 0.0, 0.0
+            for h in range(self.MAX_GOALS + 1):
+                for a in range(self.MAX_GOALS + 1):
+                    p = poisson.pmf(h, lam_h) * poisson.pmf(a, lam_a)
+                    diff = h - a + spread
+                    if diff > 0:
+                        win += p
+                    elif diff == 0:
+                        draw_s += p
+                    else:
+                        lose += p
+
+            label = f"主队{'受' if spread > 0 else '让'}{abs(spread)}球"
+            if spread == int(spread):
+                # 整数盘口有走水
+                result[label] = {
+                    "spread": spread,
+                    "win": round(win, 4),
+                    "draw": round(draw_s, 4),
+                    "lose": round(lose, 4),
+                }
+            else:
+                # 半球盘口无走水
+                result[label] = {
+                    "spread": spread,
+                    "win": round(win + draw_s, 4),  # 半球盘走水归入胜
+                    "draw": 0,
+                    "lose": round(lose, 4),
+                }
+
+        return result
+
+
 
 def build_strengths_from_results(matches: list, league: str = "default") -> dict:
     """从历史比赛结果推算攻防强度
