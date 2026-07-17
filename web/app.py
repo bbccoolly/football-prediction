@@ -551,10 +551,29 @@ def api_debug_predict():
     else:
         steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
 
+    # KNN
+    steps["knn_similar"] = {
+        "k": 20,
+        "note": "基于18维特征向量，找出历史上最相似的20场比赛，加权投票",
+    }
+
+    # XGBoost
+    steps["xgboost"] = {
+        "estimators": 200,
+        "note": "200棵梯度提升树，双头输出（胜平负+总进球），18维特征输入",
+    }
+
+    # Neural Net
+    steps["neural_net"] = {
+        "architecture": "18→32→16→3",
+        "note": "3层全连接网络，ReLU激活 + Softmax输出，SGD训练",
+    }
+
     # Monte Carlo
+    mc_model_count = 11  # 模拟时使用的模型数量
     steps["monte_carlo"] = {
         "simulations": 10000,
-        "note": "基于前11个模型的概率分布进行10000次随机模拟取平均",
+        "note": f"基于前{mc_model_count}个模型的概率分布，按权重随机选模型→按概率决定胜负→采样具体比分，重复10000次取平均",
     }
 
     # Bayesian
@@ -581,6 +600,34 @@ def api_debug_predict():
             predictions["market_odds"] = market_model.predict()
     else:
         predictions["market_odds"] = market_model.predict()
+
+    # ---- KNN / XGBoost / NeuralNet / MonteCarlo（与 /predict 一致）----
+    fq = knn_model.feature_vector(
+        poisson_model.attack_strengths.get(home_team,1.0), poisson_model.defense_strengths.get(home_team,1.0),
+        poisson_model.attack_strengths.get(away_team,1.0), poisson_model.defense_strengths.get(away_team,1.0),
+        form_model.get_form_score(home_team)["form_score"], form_model.get_form_score(away_team)["form_score"],
+        elo_model.get_rating(home_team), elo_model.get_rating(away_team),
+        elo_model.get_rating(home_team)-elo_model.get_rating(away_team))
+    predictions["knn_similar"] = knn_model.predict(fq)
+
+    fb_debug = feature_builder.build(
+        elo_home=elo_model.get_rating(home_team), elo_away=elo_model.get_rating(away_team),
+        atk_home=poisson_model.attack_strengths.get(home_team,1.0), atk_away=poisson_model.attack_strengths.get(away_team,1.0),
+        def_home=poisson_model.defense_strengths.get(home_team,1.0), def_away=poisson_model.defense_strengths.get(away_team,1.0),
+        form_home=form_model.get_form_score(home_team), form_away=form_model.get_form_score(away_team),
+        h2h_stats=h2h_model.get_h2h(home_team, away_team),
+        squad_home=1.0, squad_away=1.0,
+        home_adv=HOME_ADVANTAGE.get("default", 0.35), neutral=neutral)
+    predictions["xgboost"] = xgb_model.predict(fb_debug["vector"])
+    try:
+        predictions["neural_net"] = nn_model.predict(fb_debug["vector"])
+    except:
+        predictions["neural_net"] = {"model":"neural_net","home_win":0.35,"draw":0.30,"away_win":0.35}
+
+    preds_mc_debug = [v for v in predictions.values()]
+    w_mc_debug = [bma.get_weights().get(k, 0.08) for k in predictions.keys()]
+    predictions["monte_carlo"] = mc_model.simulate(preds_mc_debug, w_mc_debug)
+
     predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral)
 
         # 让球胜负预测
