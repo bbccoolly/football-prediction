@@ -25,13 +25,6 @@ from data.history_db import load_history
 
 app = Flask(__name__)
 
-# ---- 竞彩投注引擎 ----
-from betting.jczq_engine import JczqEngine
-from betting.jczq_planner import JczqPlanner, format_plan
-from betting.jczq_fetcher import fetch_all_odds, SAMPLE_MATCHES
-betting_engine = JczqEngine(upset_factor=0.12, is_national=True)
-betting_planner = JczqPlanner(engine=betting_engine, budget=100.0, unit_price=2.0)
-
 def _convert_numpy(obj):
     if isinstance(obj, dict):
         return {int(k) if isinstance(k, np.integer) else float(k) if isinstance(k, np.floating) else k: _convert_numpy(v) for k, v in obj.items()}
@@ -73,9 +66,8 @@ def _init_models():
 
     # 从持久化历史数据库加载真实比赛数据
     try:
-        # using pre-imported _cal_load_history
-        from data.history_db import load_history as _lh
-        history = _lh()
+        from data.history_db import load_history
+        history = load_history()
         print(f"[Init] history DB: {len(history)} matches")
     except Exception as e:
         print(f"[Init] history load failed: {e}")
@@ -127,74 +119,11 @@ def _init_models():
     nn_model.load()
     stacker.load()
 
-    # ===== 训练 XGBoost（如果未训练） =====
-    if history and len(history) >= 100:
-        if not xgb_model.is_trained:
-            try:
-                print("[Init] 训练 XGBoost (时间分割)...")
-                sorted_hist = sorted(history, key=lambda m: m.get("date", "2000-01-01"))
-                split_idx = int(len(sorted_hist) * 0.6)
-                base_hist = sorted_hist[:split_idx]
-                ml_hist = sorted_hist[split_idx:]
-
-                from models.elo import EloRating as _Elo
-                from models.form import FormModel as _Form
-                from models.head_to_head import HeadToHeadModel as _H2H
-                tmp_elo = _Elo(); tmp_elo.batch_update(base_hist)
-                tmp_form = _Form(); tmp_form.load_history(base_hist)
-                tmp_h2h = _H2H(); tmp_h2h.load_history(base_hist)
-
-                X_list, y_res, y_goals = [], [], []
-                for m in ml_hist:
-                    try:
-                        h2h = tmp_h2h.get_h2h(m["home_team"], m["away_team"])
-                        home_form = tmp_form.get_form_score(m["home_team"])
-                        away_form = tmp_form.get_form_score(m["away_team"])
-                        fb = feature_builder.build(
-                            elo_home=tmp_elo.get_rating(m["home_team"]),
-                            elo_away=tmp_elo.get_rating(m["away_team"]),
-                            atk_home=1.0, atk_away=1.0,
-                            def_home=1.0, def_away=1.0,
-                            form_home=home_form, form_away=away_form,
-                            h2h_stats=h2h, squad_home=1.0, squad_away=1.0,
-                            home_adv=HOME_ADVANTAGE.get(m.get("league","default"), 0.35),
-                            neutral=m.get("league") in ["世界杯","欧洲杯","美洲杯","欧国联"],
-                        )
-                        X_list.append(fb["vector"])
-                        hg, ag = m.get("home_goals",0), m.get("away_goals",0)
-                        y_res.append(0 if hg>ag else (1 if hg==ag else 2))
-                        y_goals.append(hg+ag)
-                    except: continue
-
-                if len(X_list) >= 50:
-                    import numpy as np
-                    xgb_model.fit(np.array(X_list), np.array(y_res), np.array(y_goals))
-                    xgb_model.save()
-                    print(f"[Init] XGBoost OK ({len(X_list)} samples)")
-            except Exception as e:
-                print(f"[Init] XGBoost train failed: {e}")
-
     _initialized = True
     print(f"[Init] {len(history)} matches, {len(_teams_cache)} teams, {len(_upcoming_matches_cache)} upcoming")
 @app.route("/")
 def index():
     _init_models()
-    # Pre-load WC matches for server-side rendering
-    from data.history_db import load_history
-    from datetime import datetime, timedelta, timezone
-    history = load_history()
-    wc_matches = [m for m in history if m.get("league") == "世界杯" and m.get("home_goals") is not None]
-    wc_matches = [m for m in wc_matches if m.get("home_team") != "?" and m.get("away_team") != "?"]
-    wc_matches = [m for m in wc_matches if m.get("date","").startswith("2026")]
-    def _bj_key(m):
-        dt_str = m.get("date_time", m.get("date",""))
-        try:
-            dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
-            return dt.astimezone(timezone(timedelta(hours=8))).isoformat()
-        except:
-            return dt_str
-    wc_matches.sort(key=_bj_key, reverse=True)
-
     return render_template("index.html",
                           national_teams=NATIONAL_TEAMS,
                           club_teams=CLUB_TEAMS,
@@ -202,7 +131,6 @@ def index():
                           players=SAMPLE_PLAYERS,
                           leagues=list(LEAGUES.keys()),
                           upcoming=_upcoming_matches_cache[:50],
-                          wc_matches=wc_matches[:30],
                           fetch_errors=_fetch_errors)
 
 @app.route("/api/status")
@@ -367,11 +295,7 @@ def predict():
         squad_home=squad_info["home_completeness"], squad_away=squad_info["away_completeness"],
         home_adv=home_adv, neutral=neutral)
     predictions["xgboost"] = xgb_model.predict(fb["vector"]); report(9,"XGBoost")
-    try:
-        predictions["neural_net"] = nn_model.predict(fb["vector"])
-    except:
-        predictions["neural_net"] = {"model":"neural_net","home_win":0.35,"draw":0.30,"away_win":0.35,"status":"error","data_quality":0.1,"data_valid":False,"missing_teams":[],"using_defaults":True}
-    report(10,"神经网络")
+    predictions["neural_net"] = nn_model.predict(fb["vector"]); report(10,"神经网络")
 
     preds_mc = [v for v in predictions.values()]
     w_mc = [bma.get_weights().get(k,0.08) for k in predictions.keys()]
@@ -381,13 +305,9 @@ def predict():
     handicap_result = poisson_model.predict_handicap(home_team, away_team, neutral)
     blend_result = bma.blend(predictions)
 
-        # Only use valid models for confidence calculation
-    valid_preds = {k: v for k, v in predictions.items() if v.get("data_valid", True)}
-    if not valid_preds:
-        valid_preds = predictions
-    home_probs = [p["home_win"] for p in valid_preds.values()]
-    draw_probs = [p["draw"] for p in valid_preds.values()]
-    away_probs = [p["away_win"] for p in valid_preds.values()]
+    home_probs = [p["home_win"] for p in predictions.values()]
+    draw_probs = [p["draw"] for p in predictions.values()]
+    away_probs = [p["away_win"] for p in predictions.values()]
     std_h = math.sqrt(sum((x-sum(home_probs)/len(home_probs))**2 for x in home_probs)/len(home_probs))
     std_d = math.sqrt(sum((x-sum(draw_probs)/len(draw_probs))**2 for x in draw_probs)/len(draw_probs))
     std_a = math.sqrt(sum((x-sum(away_probs)/len(away_probs))**2 for x in away_probs)/len(away_probs))
@@ -426,6 +346,7 @@ def api_refresh_data():
         return jsonify({"status":"ok" if success else "no_data","upcoming":len(_upcoming_matches_cache),"teams":len(_teams_cache),"errors":_fetch_errors})
     except Exception as e:
         return jsonify({"status":"error","message":str(e)}),500
+
 
 @app.route("/api/debug_predict", methods=["POST"])
 def api_debug_predict():
@@ -567,147 +488,10 @@ def api_debug_predict():
 
     return jsonify(_convert_numpy(debug))
 
-@app.route("/api/history/matches")
-def api_history_matches():
-    """历史比赛列表（分页）"""
-    # using pre-imported _cal_load_history
-    page = request.args.get("page", 1, type=int)
-    league = request.args.get("league", "")
-    team = request.args.get("team", "")
-    per_page = 40
-    
-    history = load_history()
-    if league:
-        history = [m for m in history if m.get("league","") == league]
-    if team:
-        history = [m for m in history if team in m.get("home_team","") or team in m.get("away_team","")]
-    
-    history.sort(key=lambda m: m.get("date",""), reverse=True)
-    total = len(history)
-    start = (page - 1) * per_page
-    matches = history[start:start+per_page]
-    
-    leagues = sorted(set(m.get("league","") for m in load_history() if m.get("league")))
-    
-    return jsonify({"matches": matches, "total": total, "page": page, "per_page": per_page, "leagues": leagues})
-
-@app.route("/api/history/h2h")
-def api_history_h2h():
-    """两队交锋记录"""
-    # using pre-imported _cal_load_history
-    team_a = request.args.get("a", "")
-    team_b = request.args.get("b", "")
-    history = load_history()
-    h2h = [m for m in history if (m.get("home_team")==team_a and m.get("away_team")==team_b) or (m.get("home_team")==team_b and m.get("away_team")==team_a)]
-    h2h.sort(key=lambda m: m.get("date",""), reverse=True)
-    return jsonify({"matches": h2h, "count": len(h2h)})
-
-@app.route("/api/history/trend")
-def api_history_trend():
-    """球队近期趋势"""
-    # using pre-imported _cal_load_history
-    team = request.args.get("team", "")
-    n = request.args.get("n", 20, type=int)
-    history = load_history()
-    matches = [m for m in history if m.get("home_team")==team or m.get("away_team")==team]
-    matches.sort(key=lambda m: m.get("date",""), reverse=True)
-    matches = matches[:n]
-    
-    trend = []
-    for m in reversed(matches):
-        is_home = m.get("home_team") == team
-        gf = m.get("home_goals",0) if is_home else m.get("away_goals",0)
-        ga = m.get("away_goals",0) if is_home else m.get("home_goals",0)
-        if gf > ga: result = "W"
-        elif gf == ga: result = "D"
-        else: result = "L"
-        trend.append({"date": m.get("date",""), "opponent": m.get("away_team","") if is_home else m.get("home_team",""), "gf": gf, "ga": ga, "result": result, "league": m.get("league","")})
-    
-    return jsonify({"team": team, "trend": trend, "count": len(trend)})
-
 @app.route("/history")
 def history():
     return render_template("history.html")
 
-# ============================================================
-# 竞彩投注分析
-# ============================================================
-
-@app.route("/betting")
-def betting():
-    return render_template("bet_plan.html")
-
-@app.route("/api/betting/analyze", methods=["POST"])
-def api_betting_analyze():
-    """运行完整投注分析"""
-    try:
-        data = request.get_json() or {}
-        upset = float(data.get("upset", 0.12))
-        budget = float(data.get("budget", 100.0))
-        use_sample = data.get("use_sample", False)
-        
-        if use_sample:
-            matches = SAMPLE_MATCHES
-        else:
-            try:
-                fetched = fetch_all_odds(force_refresh=True)
-                matches = fetched.get("matches", [])
-                if not matches:
-                    matches = SAMPLE_MATCHES
-            except Exception as e:
-                matches = SAMPLE_MATCHES
-        
-        # 重建引擎(可调冷门因子)
-        engine = JczqEngine(upset_factor=upset, is_national=True)
-        planner = JczqPlanner(engine=engine, budget=budget, unit_price=2.0)
-        
-        plan = planner.generate_plan(matches)
-        text_output = format_plan(plan)
-        
-        # 准备JSON响应
-        bets_json = []
-        for b in plan["bets"]:
-            bets_json.append({
-                "id": b["match_id"],
-                "play": b["play_type"],
-                "sel": b["selection"],
-                "desc": b["desc"],
-                "odds": b["odds"],
-                "prob": round(b["algo_prob"] * 100, 1),
-                "ev_pct": b["ev_pct"],
-                "stake": b["stake"],
-                "zhu": b["zhu"],
-                "ret": b["expected_return"],
-                "is_single": not b["parlay_only"],
-            })
-        
-        return jsonify({
-            "ok": True,
-            "match_count": len(matches),
-            "candidates": plan["candidates_count"],
-            "bet_count": len(plan["bets"]),
-            "single_count": len(plan["single_bets"]),
-            "parlay_count": len(plan["parlay_bets"]),
-            "total_stake": plan["total_stake"],
-            "total_return": plan["total_expected_return"],
-            "bets": bets_json,
-            "text": text_output,
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
-
-@app.route("/api/betting/matches")
-def api_betting_matches():
-    """获取比赛列表（预加载）"""
-    try:
-        fetched = fetch_all_odds(force_refresh=False)
-        matches = fetched.get("matches", [])
-        if not matches:
-            matches = SAMPLE_MATCHES
-        return jsonify({"ok": True, "count": len(matches), "matches": matches})
-    except Exception as e:
-        return jsonify({"ok": True, "count": len(SAMPLE_MATCHES), "matches": SAMPLE_MATCHES, "fallback": True})
 
 @app.route("/api/calibration")
 def api_calibration():
@@ -727,258 +511,55 @@ def api_calibration():
 
 @app.route("/api/rankings")
 def api_rankings():
-    import json, os
-    meta_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "processed", "team_meta.json")
-    national_set = set()
-    if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        national_set = set(meta.keys())
-    from config import NATIONAL_TEAMS
-    national_set.update(NATIONAL_TEAMS)
-    all_rankings = elo_model.get_league_rankings()
-    national = []
-    clubs = []
-    for team, rating in all_rankings:
-        entry = {"team": team, "elo": round(rating, 0)}
-        if team in national_set:
-            conf = ""
-            if os.path.exists(meta_path):
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta2 = json.load(f)
-                conf = meta2.get(team, {}).get("confederation", "")
-            entry["confederation"] = conf
-            national.append(entry)
-        else:
-            clubs.append(entry)
-    return jsonify({
-        "national": national[:50],
-        "clubs": clubs[:30],
-        "total_teams": len(all_rankings),
-        "national_count": len(national),
-        "club_count": len(clubs),
-    })
+    return jsonify(elo_model.get_league_rankings()[:20])
+
 
 @app.route("/api/wc_matches")
 def api_wc_matches():
     """获取2026世界杯已完成比赛"""
-    from data.history_db import load_history
-    from datetime import datetime, timedelta, timezone
     history = load_history()
     wc = [m for m in history if m.get("league") == "世界杯" and m.get("home_goals") is not None]
     wc = [m for m in wc if m.get("home_team") != "?" and m.get("away_team") != "?"]
     wc = [m for m in wc if m.get("date","").startswith("2026")]
-    # Sort by Beijing time (UTC+8)
-    def bj_key(m):
-        dt_str = m.get("date_time", m.get("date",""))
-        try:
-            dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
-            bj_dt = dt.astimezone(timezone(timedelta(hours=8)))
-            return bj_dt.isoformat()
-        except:
-            return dt_str
-    wc.sort(key=bj_key, reverse=True)
-    return jsonify({"count": len(wc), "matches": wc})
+    try:
+        from datetime import datetime
+        wc.sort(key=lambda m: datetime.strptime(m.get("date","")[:10],"%Y-%m-%d"), reverse=True)
+    except:
+        pass
+    return jsonify({"matches": wc, "count": len(wc)})
 
 @app.route("/api/sync_fifa")
 def api_sync_fifa():
     """同步FIFA世界杯比赛数据"""
-    from data.history_db import load_history, add_match
+    from data.history_db import add_match
     from models.elo import EloRating
-    from models.poisson import build_strengths_from_results
-    import requests as req, unicodedata
-    from datetime import datetime, timedelta, timezone
-
+    import requests as req
     try:
-        H = {"User-Agent": "Mozilla/5.0"}
-        EN_CN = {
-            "Argentina":"阿根廷","Brazil":"巴西","Germany":"德国","France":"法国","Spain":"西班牙",
-            "England":"英格兰","Italy":"意大利","Netherlands":"荷兰","Portugal":"葡萄牙","Belgium":"比利时",
-            "Croatia":"克罗地亚","Uruguay":"乌拉圭","Colombia":"哥伦比亚","Mexico":"墨西哥",
-            "Japan":"日本","Korea Republic":"韩国","Iran":"伊朗","IR Iran":"伊朗",
-            "Saudi Arabia":"沙特阿拉伯","Australia":"澳大利亚","Senegal":"塞内加尔",
-            "Morocco":"摩洛哥","Tunisia":"突尼斯","Ghana":"加纳","Cameroon":"喀麦隆",
-            "Nigeria":"尼日利亚","Egypt":"埃及","Algeria":"阿尔及利亚",
-            "Costa Rica":"哥斯达黎加","USA":"美国","Canada":"加拿大","Panama":"巴拿马",
-            "Ecuador":"厄瓜多尔","Peru":"秘鲁","Chile":"智利","Paraguay":"巴拉圭",
-            "Switzerland":"瑞士","Austria":"奥地利","Serbia":"塞尔维亚","Denmark":"丹麦",
-            "Sweden":"瑞典","Norway":"挪威","Poland":"波兰","Czechia":"捷克",
-            "Ukraine":"乌克兰","Turkey":"土耳其","Greece":"希腊","Scotland":"苏格兰",
-            "Wales":"威尔士","Hungary":"匈牙利","Slovakia":"斯洛伐克","Romania":"罗马尼亚",
-            "Finland":"芬兰","Iceland":"冰岛","Slovenia":"斯洛文尼亚",
-            "Bosnia and Herzegovina":"波黑","Georgia":"格鲁吉亚","Israel":"以色列",
-            "Venezuela":"委内瑞拉","Haiti":"海地","South Africa":"南非",
-            "Qatar":"卡塔尔","Iraq":"伊拉克","United Arab Emirates":"阿联酋",
-            "New Zealand":"新西兰","Burkina Faso":"布基纳法索","Mali":"马里",
-            "Cote d'Ivoire":"科特迪瓦","Côte d'Ivoire":"科特迪瓦",
-            "Türkiye":"土耳其","Curaçao":"库拉索","Curacao":"库拉索",
-            "Cabo Verde":"佛得角","Congo DR":"刚果民主共和国","Jordan":"约旦",
-        }
-        def tr(n):
-            if not n: return "?"
-            if n in EN_CN: return EN_CN[n]
-            n_norm = unicodedata.normalize('NFKD', n).encode('ascii','ignore').decode()
-            for e, c in EN_CN.items():
-                e_norm = unicodedata.normalize('NFKD', e).encode('ascii','ignore').decode()
-                if e_norm.lower() == n_norm.lower(): return c
-                if e_norm.lower() in n_norm.lower() or n_norm.lower() in e_norm.lower(): return c
-            return n
-
+        resp = req.get("https://www.fifa.com/en/match-centre/api/competitions/17/matches?count=100",
+                       headers={"User-Agent":"Mozilla/5.0"}, timeout=20)
+        data = resp.json()
+        results = data.get("results", data.get("data", []))
         history = load_history()
         db_keys = set((m.get("home_team",""), m.get("away_team",""), m.get("date","")) for m in history)
-        added = 0
-        fetched = 0
-        
-        today = datetime.now(timezone.utc)
-        # Query in 3-day chunks to avoid API pagination limits
-        for days_back in range(14, -1, -3):
-            sd = (today - timedelta(days=min(days_back+2, 14))).strftime("%Y-%m-%dT00:00:00Z")
-            ed = (today - timedelta(days=max(days_back-1, 0))).strftime("%Y-%m-%dT23:59:59Z")
-            try:
-                r = req.get("https://api.fifa.com/api/v3/calendar/matches",
-                    params={"language":"en","count":200,"from":sd,"to":ed}, headers=H, timeout=15)
-                results = r.json().get("Results",[])
-                for m in results:
-                    comp = (m.get("CompetitionName",[{}]) or [{}])[0].get("Description","")
-                    if "World Cup" not in comp or "Women" in comp: continue
-                    fetched += 1
-                    
-                    home = m.get("Home",{})
-                    away = m.get("Away",{})
-                    hn = tr((home.get("TeamName",[{}]) or [{}])[0].get("Description") or home.get("ShortClubName") or "")
-                    an = tr((away.get("TeamName",[{}]) or [{}])[0].get("Description") or away.get("ShortClubName") or "")
-                    hs = m.get("HomeTeamScore")
-                    aws = m.get("AwayTeamScore")
-                    if hs is None or aws is None: continue
-                    if hn == "?" or an == "?" or hn == an: continue
-                    
-                    key = (hn, an, (m.get("Date") or "")[:10])
-                    if key not in db_keys:
-                        match = {"home_team":hn,"away_team":an,"home_goals":int(hs),"away_goals":int(aws),"league":"世界杯","date":key[2]}
-                        add_match(match)
-                        db_keys.add(key)
-                        added += 1
-            except: pass
-
+        added = 0; fetched = 0
+        for m in results:
+            fetched += 1
+            home = (m.get("homeTeam",{}) or {}).get("name","") or (m.get("home",{}) or {}).get("name","")
+            away = (m.get("awayTeam",{}) or {}).get("name","") or (m.get("away",{}) or {}).get("name","")
+            hs = m.get("homeScore", m.get("homeGoals"))
+            aws = m.get("awayScore", m.get("awayGoals"))
+            if not home or not away or hs is None: continue
+            key = (home, away, (m.get("date","") or "")[:10])
+            if key not in db_keys:
+                add_match({"home_team":home,"away_team":away,"home_goals":int(hs),"away_goals":int(aws),"league":"世界杯","date":key[2]})
+                db_keys.add(key); added += 1
         if added > 0:
             h2 = load_history()
             elo = EloRating(); elo.load(); elo.batch_update(h2); elo.save()
-            strengths = build_strengths_from_results(h2)
-            poisson_model.set_team_strengths(strengths)
-
         return jsonify({"status":"ok","fetched":fetched,"added":added,"total_history":len(load_history())})
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        return jsonify({"error":str(e)}), 500
 
-# Pre-import calibrate to avoid thread issues
-try:
-    from calibrate import backtest as _cal_backtest, calibrate_weights as _cal_weights
-    # using pre-imported _cal_load_history as _cal_load_history
-    CAL_AVAILABLE = True
-except Exception as e:
-    print(f"[Calibrate] Import warning: {e}")
-    CAL_AVAILABLE = False
-
-# ========== 校准系统 Web 界面 ==========
-_calibration_state = {"running": False, "progress": 0, "message": "", "report": None, "weights": None, "total": 0}
-
-@app.route("/rankings")
-def rankings_page():
-    from flask import redirect
-    return redirect("/history#rankings")
-
-@app.route("/calibrate")
-def calibrate_page():
-    return render_template("calibrate.html")
-
-@app.route("/api/calibrate/run")
-def api_calibrate_run():
-    """启动校准（后台运行 calibrate.py）"""
-    import json, os, subprocess, sys
-    
-    # Check if already running via status file
-    status_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_status.json")
-    if os.path.exists(status_file):
-        with open(status_file, "r", encoding="utf-8") as f:
-            s = json.load(f)
-        if not s.get("done", True):
-            return jsonify({"error": "校准已在运行中", "progress": s.get("progress",0), "message": s.get("message","")}), 409
-    
-    # Start calibrate.py in background
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "calibrate.py")
-    try:
-        subprocess.Popen([sys.executable, script], cwd=os.path.dirname(script),
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-        return jsonify({"status": "started", "message": "calibrate.py 已在后台启动，约需 1-3 分钟"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route("/api/lottery/predict/<lottery_key>")
-@app.route("/api/lottery/predict/<lottery_key>")
-def api_lottery_predict(lottery_key):
-    """prediction API: ?force=1 refresh data, ?regen=1 regenerate only"""
-    from lottery_fetcher import fetch_lottery
-    from lottery_predictor import full_analysis, generate_prediction
-    force = request.args.get("force", "0") == "1"
-    regen = request.args.get("regen", "0") == "1"
-    try:
-        history = fetch_lottery(lottery_key, count=50, force_refresh=force)
-        if not history:
-            return jsonify({"error": f"no data for {lottery_key}"}), 404
-
-        if regen:
-            analysis = full_analysis(lottery_key, history)
-            return jsonify(analysis)
-
-        analysis = full_analysis(lottery_key, history)
-        return jsonify(analysis)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route("/api/calibrate/status")
-def api_calibrate_status():
-    """查询校准状态（读取 calibrate.py 写入的状态文件）"""
-    import json, os
-    status_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_status.json")
-    if os.path.exists(status_file):
-        with open(status_file, "r", encoding="utf-8") as f:
-            s = json.load(f)
-        # If done, also load the report
-        if s.get("done"):
-            report_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_report.json")
-            if os.path.exists(report_file):
-                with open(report_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                s["report"] = data.get("report", {})
-                s["weights"] = data.get("weights", {})
-                s["total"] = data.get("total_matches", 0)
-        return jsonify(s)
-    return jsonify({"progress": 0, "message": "尚未运行校准", "done": True})
-
-@app.route("/api/calibrate/report")
-def api_calibrate_report():
-    import json, os
-    report_file = "data/processed/calibration_report.json"
-    if os.path.exists(report_file):
-        with open(report_file, "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
-    return jsonify({"error":"暂无校准报告"}), 404
-
-# ========== 彩票开奖查询 ==========
-from lottery_fetcher import fetch_all as _fetch_all_lottery
-
-@app.route("/lottery")
-def lottery_page():
-    """彩票开奖结果页面"""
-    return render_template("lottery.html")
-
-@app.route("/api/lottery")
-def api_lottery():
-    """获取彩票开奖数据"""
-    try:
-        data = _fetch_all_lottery(count=30)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 if __name__ == "__main__":
     print("\n"+"="*60)
     print("  Soccer Prediction System v2.1")

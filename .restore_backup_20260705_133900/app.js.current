@@ -1,4 +1,3 @@
-// DEBUG v12 loaded
 // app.js -- v3.3  fixed & verified
 
 var pieChart = null;
@@ -459,9 +458,8 @@ function renderResults(data) {
         for (var i = 0; i < htftItems.length; i++) {
             var label = htftItems[i][0];
             var prob = (htftItems[i][1] * 100).toFixed(1);
-            var odds = htftItems[i][2] !== undefined ? htftItems[i][2] : (100 / (htftItems[i][1] * 100)).toFixed(2);
             var cls = prob > 20 ? "htft-cell high" : "htft-cell";
-            htftHtml += '<div class="' + cls + '"><div class="label">' + label + '</div><div class="pct">' + prob + '%</div><div class="htft-odds">' + odds + '</div></div>';
+            htftHtml += '<div class="' + cls + '"><div class="label">' + label + '</div><div class="pct">' + prob + '%</div></div>';
         }
         htftGrid.innerHTML = htftHtml;
     }
@@ -537,27 +535,11 @@ function renderPieChart(home, draw, away) {
 }
 
 var MODEL_NAMES = {
-    poisson: "泊松分布", dixon_coles: "Dixon-Coles模型", elo: "ELO等级分",
-    massey: "Massey排名法", form: "近期状态", head_to_head: "交锋记录",
-    market_odds: "市场赔率", knn_similar: "K近邻相似",
-    xgboost: "XGBoost集成", neural_net: "神经网络",
-    monte_carlo: "蒙特卡洛模拟", bayesian: "贝叶斯层次",
-};
-
-// 模型介绍
-var MODEL_DESC = {
-    poisson: "泊松分布模型：基于主客队进攻/防守强度，用泊松分布计算各比分概率。核心公式：λ主 = 攻主×防客×联赛均值。适合预测总进球分布。",
-    dixon_coles: "Dixon-Coles模型：泊松分布的改进版，增加了低比分（0-0/1-0/0-1）的相关性校正。更精确地捕捉小比分赛果。",
-    elo: "ELO等级分：源自国际象棋排名，每场比赛后根据实际结果和预期结果的差值调整分数。分数差转换为胜率：P=1/(1+10^(-Δ/400))。",
-    massey: "Massey排名法：线性代数方法，将所有比赛结果转为联立方程组，求解每队的绝对实力值。考虑净胜球而非仅胜负。",
-    form: "近期状态：分析球队近 8 场比赛的胜率、进失球差、场均积分，用衰减加权越近期越重要。",
-    head_to_head: "交锋记录：查询两队历史对战数据，统计各自的胜率、进球数、平均比分。无交锋时不参与计算。",
-    market_odds: "市场赔率：从博彩公司赔率反推胜平负概率，去除水头后归一化。赔率是单一最强预测信号，有真实数据时自动增权。",
-    knn_similar: "K近邻相似：找出历史上特征（攻防/状态/ELO）最接近的 K 场比赛，加权投票预测。“类似对手当年怎么打就怎么预测”。",
-    xgboost: "XGBoost集成：梯度提升决策树集成，200棵树逐步纠错。双头输出：胜平负概率 + 总进球数。擅长捕捉非线性组合规律。",
-    neural_net: "神经网络：3层全连接网络(18-32-16-3)，SGD反向传播训练。理论上能拟合任意复杂函数，但容易过拟合。",
-    monte_carlo: "蒙特卡洛模拟：将各模型输出当作分布采样，模拟 10000 场比赛，统计各结果频率。可以融合多个模型的不确定性。",
-    bayesian: "贝叶斯层次：用贝叶斯推断估计每队的隐藏实力参数，先验分布+似然函数→后验分布。对数据稀疏球队也能给出合理估计。",
+    poisson: "泊松分布", dixon_coles: "Dixon-Coles", elo: "ELO评级",
+    massey: "Massey排名", form: "近期状态", head_to_head: "交锋记录",
+    market_odds: "市场赔率", knn_similar: "KNN相似",
+    xgboost: "XGBoost", neural_net: "神经网络",
+    monte_carlo: "蒙特卡洛", bayesian: "贝叶斯层次",
 };
 
 function renderModelsTable(preds, weights) {
@@ -570,7 +552,7 @@ function renderModelsTable(preds, weights) {
         var goals = pred.expected_total_goals ? pred.expected_total_goals.toFixed(1) : "-";
         var cls = pred.status ? "dimmed" : "";
         html += "<tr class='" + cls + "'>"
-             + "<td class='model-name' data-model='" + key + "' onclick='showModelInfo(event, \"" + key + "\")' title='点击查看模型介绍'>" + (MODEL_NAMES[key] || key) + "</td>"
+             + "<td class='model-name'>" + (MODEL_NAMES[key] || key) + "</td>"
              + "<td class='prob-cell h'>" + (pred.home_win * 100).toFixed(1) + "%</td>"
              + "<td class='prob-cell d'>" + (pred.draw * 100).toFixed(1) + "%</td>"
              + "<td class='prob-cell a'>" + (pred.away_win * 100).toFixed(1) + "%</td>"
@@ -579,40 +561,6 @@ function renderModelsTable(preds, weights) {
              + "</tr>";
     }
     tbody.innerHTML = html;
-}
-
-// 点击模型名称显示介绍弹窗
-function showModelInfo(e, modelKey) {
-    e.stopPropagation();
-    var existing = document.getElementById('modelPopover');
-    if (existing) existing.remove();
-    
-    var desc = MODEL_DESC[modelKey] || "暂无介绍";
-    var name = MODEL_NAMES[modelKey] || modelKey;
-    
-    var popover = document.createElement('div');
-    popover.id = 'modelPopover';
-    popover.className = 'model-popover';
-    popover.innerHTML = '<div class="mp-header">' + name + '</div><div class="mp-body">' + desc + '</div><div class="mp-close" onclick="closeModelInfo()">✕</div>';
-    
-    document.body.appendChild(popover);
-    
-    var rect = e.target.getBoundingClientRect();
-    var top = rect.bottom + 8;
-    var left = rect.left;
-    if (left + 380 > window.innerWidth) left = window.innerWidth - 390;
-    if (top + 200 > window.innerHeight) top = rect.top - 210;
-    popover.style.top = top + 'px';
-    popover.style.left = left + 'px';
-    
-    setTimeout(function() {
-        document.addEventListener('click', closeModelInfo, {once: true});
-    }, 100);
-}
-
-function closeModelInfo() {
-    var el = document.getElementById('modelPopover');
-    if (el) el.remove();
 }
 
 function renderGoalsChart(dist) {
@@ -771,12 +719,10 @@ function renderDebug(d) {
         h += "<div class='debug-section'>";
         h += "<h3>半全场预测 (半场/全场)</h3>";
         h += "<table class='debug-table'>";
-        h += "<tr><th>结果</th><th>概率</th><th>赔率</th></tr>";
         var htftTop = d.htft.top.slice(0, 9);
         for (var i = 0; i < htftTop.length; i++) {
             var item = htftTop[i];
-            var odds = item[2] !== undefined ? item[2] : "-";
-            h += "<tr><td>" + item[0] + "</td><td class='v'>" + (item[1]*100).toFixed(1) + "%</td><td class='v'>@" + odds + "</td></tr>";
+            h += "<tr><td>" + item[0] + "</td><td class='v'>" + (item[1]*100).toFixed(1) + "%</td></tr>";
         }
         h += "</table></div>";
     }
@@ -786,10 +732,9 @@ function renderDebug(d) {
     h += "<h3>各模型计算过程</h3>";
 
     var modelNames = {
-        poisson: "泊松分布", dixon_coles: "Dixon-Coles模型", elo: "ELO等级分", 
-        massey: "Massey排名法", form: "近期状态", head_to_head: "交锋记录",
-        market_odds: "市场赔率", knn_similar: "K近邻相似", xgboost: "XGBoost集成",
-        neural_net: "神经网络", monte_carlo: "蒙特卡洛模拟", bayesian: "贝叶斯层次",
+        poisson: "泊松分布", elo: "ELO 评级", massey: "Massey 排名",
+        form: "近期状态", head_to_head: "交锋记录",
+        market_odds: "市场赔率", monte_carlo: "蒙特卡洛", bayesian: "贝叶斯层次",
     };
 
     for (var key in steps) {
@@ -859,125 +804,74 @@ document.addEventListener("keydown", function (e) {
 // ======================================================================
 async function loadSidebar() {
     var list = document.getElementById('sidebarList');
-    if (!list) return;
     list.innerHTML = '<div class="loading-text">加载中...</div>';
-
-    // Use embedded data if available, otherwise fetch
-    var matches;
     try {
-        if (typeof EMBEDDED_UPCOMING !== 'undefined' && EMBEDDED_UPCOMING && EMBEDDED_UPCOMING.length > 0) {
-            matches = EMBEDDED_UPCOMING;
-        } else {
-            var r = await fetch('/api/upcoming');
-            var d = await r.json();
-            matches = d.upcoming || [];
-        }
-    } catch (e) {
-        try {
-            var r2 = await fetch('/api/upcoming');
-            var d2 = await r2.json();
-            matches = d2.upcoming || [];
-        } catch (e2) {
-            list.innerHTML = '<div class="loading-text">加载失败: ' + e2.message + '</div>';
+        var r = await fetch('/api/upcoming');
+        var d = await r.json();
+        var matches = d.upcoming || [];
+        if (matches.length === 0) {
+            list.innerHTML = '<div class="empty-state">暂无近期比赛</div>';
             return;
         }
+        var html = '';
+        for (var i = 0; i < matches.length; i++) {
+            var m = matches[i];
+            var home = m.home_team || '?';
+            var away = m.away_team || '?';
+            var league = m.league || '';
+            var ho = m.home_odds ? '<span class="ho">' + m.home_odds + '</span>' : '';
+            var do_s = m.draw_odds ? '<span class="do">' + m.draw_odds + '</span>' : '';
+            var ao = m.away_odds ? '<span class="ao">' + m.away_odds + '</span>' : '';
+            var oddStr = (ho || do_s || ao) ? '<div class="sm-odds">' + ho + ' ' + do_s + ' ' + ao + '</div>' : '';
+            var leagueTag = league ? '<span class="sm-league">' + escHtml(league) + '</span>' : '';
+            var venue = m.venue ? escHtml(m.venue) : '';
+            html += '<div class="sidebar-match" onclick="sidebarPredict(\'' + escHtml(home) + '\',\'' + escHtml(away) + '\',\'' + escHtml(league) + '\',' + (m.home_odds||0) + ',' + (m.draw_odds||0) + ',' + (m.away_odds||0) + ')">';
+            html += '<div class="sm-teams">' + escHtml(home) + ' <span style="color:var(--text-muted);font-size:.7rem">vs</span> ' + escHtml(away) + '</div>';
+            html += '<div class="sm-info">' + leagueTag + ' ' + venue + '</div>';
+            html += oddStr;
+            html += '</div>';
+        }
+        list.innerHTML = html;
+    } catch (e) {
+        list.innerHTML = '<div class="loading-text">加载失败: ' + e.message + '</div>';
     }
-
-    if (!matches || matches.length === 0) {
-        list.innerHTML = '<div class="empty-state">暂无近期比赛</div>';
-        return;
-    }
-
-    var html = '';
-    for (var i = 0; i < matches.length; i++) {
-        var m = matches[i];
-        var home = m.home_team || '?';
-        var away = m.away_team || '?';
-        var league = m.league || '';
-        var ho = m.home_odds ? '<span class="ho">' + m.home_odds + '</span>' : '';
-        var do_s = m.draw_odds ? '<span class="do">' + m.draw_odds + '</span>' : '';
-        var ao = m.away_odds ? '<span class="ao">' + m.away_odds + '</span>' : '';
-        var oddStr = (ho || do_s || ao) ? '<div class="sm-odds">' + ho + ' ' + do_s + ' ' + ao + '</div>' : '';
-        var leagueTag = league ? '<span class="sm-league">' + escHtml(league) + '</span>' : '';
-        var venue = m.venue ? escHtml(m.venue) : '';
-        html += '<div class="sidebar-match" onclick="sidebarPredict(\'' + escHtml(home) + '\',\'' + escHtml(away) + '\',\'' + escHtml(league) + '\',' + (m.home_odds||0) + ',' + (m.draw_odds||0) + ',' + (m.away_odds||0) + ')">';
-        html += '<div class="sm-teams">' + escHtml(home) + ' <span style="color:var(--text-muted);font-size:.7rem">vs</span> ' + escHtml(away) + '</div>';
-        html += '<div class="sm-info">' + leagueTag + ' ' + venue + '</div>';
-        html += oddStr;
-        html += '</div>';
-    }
-    list.innerHTML = html;
 }
 
 
-
-// ======================================================================
-// Sidebar - 世界杯赛果
-// ======================================================================
 async function loadWcMatches() {
-    var list = document.getElementById('wcMatchList');
+    var list = document.getElementById("wcMatchList");
     if (!list) return;
-    list.innerHTML = '<div class="loading-text" style="font-size:.7rem">加载中...</div>';
-
-    // Use embedded data if available, otherwise fetch
-    var matches;
+    list.innerHTML = '<div class="loading-text" style="font-size:.65rem">加载中...</div>';
     try {
-        if (typeof EMBEDDED_WC !== 'undefined' && EMBEDDED_WC && EMBEDDED_WC.length > 0) {
-            matches = EMBEDDED_WC;
-        } else {
-            var r = await fetch('/api/wc_matches');
-            var d = await r.json();
-            matches = d.matches || [];
-        }
-    } catch (e) {
-        try {
-            var r2 = await fetch('/api/wc_matches');
-            var d2 = await r2.json();
-            matches = d2.matches || [];
-        } catch (e2) {
-            list.innerHTML = '<div style="color:var(--text-muted);font-size:.7rem;padding:4px">加载失败</div>';
+        var r = await fetch("/api/wc_matches");
+        var d = await r.json();
+        var matches = d.matches || [];
+        if (matches.length === 0) {
+            list.innerHTML = '<div style="font-size:.65rem;color:var(--text-muted);padding:4px;text-align:center">暂无</div>';
             return;
         }
-    }
-
-    if (!matches || matches.length === 0) {
-        list.innerHTML = '<div style="color:var(--text-muted);font-size:.7rem;padding:4px">暂无世界杯赛果</div>';
-        return;
-    }
-
-    var html = '';
-    for (var i = 0; i < Math.min(matches.length, 30); i++) {
-        var m = matches[i];
-        var timeStr = m.date || '';
-        if (m.date_time) {
-            var dt = new Date(m.date_time);
-            timeStr = dt.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+        var html = "";
+        for (var i = 0; i < Math.min(matches.length, 20); i++) {
+            var m = matches[i];
+            html += '<div class="sidebar-match wc" onclick="sidebarPredict(\'' + escHtml(m.home_team) + '\',\'' + escHtml(m.away_team) + '\',\'' + escHtml(m.league || "世界杯") + '\',0,0,0)" style="border-left:2px solid var(--green);padding:3px 6px;margin:1px 0;cursor:pointer;font-size:.68rem">';
+            html += escHtml(m.home_team) + ' <b style="color:var(--green)">' + (m.home_goals||0) + '-' + (m.away_goals||0) + '</b> ' + escHtml(m.away_team);
+            html += '</div>';
         }
-        html += '<div class="sidebar-match wc" onclick="sidebarPredict(\'' + escHtml(m.home_team) + '\',\'' + escHtml(m.away_team) + '\',\'' + escHtml(m.league || '世界杯') + '\',0,0,0)">';
-        html += '<div class="sm-teams">' + escHtml(m.home_team) + ' <span class="sm-score">' + (m.home_goals||0) + '-' + (m.away_goals||0) + '</span> ' + escHtml(m.away_team) + '</div>';
-        html += '<div class="sm-info">' + timeStr + '</div>';
-        html += '</div>';
-    }
-    list.innerHTML = html;
+        list.innerHTML = html;
+    } catch (e) { list.innerHTML = '<div style="font-size:.65rem;color:var(--text-muted);text-align:center">加载失败</div>'; }
 }
-
 function syncFifa() {
     var btn = event.target;
-    btn.disabled = true;
-    btn.textContent = '同步中...';
-    fetch('/api/sync_fifa').then(function(r) { return r.json(); }).then(function(d) {
-        alert('同步完成: 获取' + d.fetched + '场, 新增' + d.added + '场');
-        loadWcMatches();
-        loadSidebar();
-        btn.disabled = false;
-        btn.textContent = '📡 同步';
-    }).catch(function(e) {
-        alert('同步失败: ' + e.message);
-        btn.disabled = false;
-        btn.textContent = '📡 同步';
+    btn.disabled = true; btn.textContent = "同步中...";
+    fetch("/api/sync_fifa").then(function(r){return r.json()}).then(function(d){
+        alert("同步: +"+d.added+"场");
+        loadWcMatches(); loadSidebar();
+        btn.disabled = false; btn.textContent = "📡 同步";
+    }).catch(function(e){
+        alert("失败: "+e.message);
+        btn.disabled = false; btn.textContent = "📡 同步";
     });
 }
-
 function sidebarPredict(home, away, league, ho, draw_o, ao) {
     // Set teams
     selectedHome = home;
@@ -1032,21 +926,12 @@ function sidebarPredict(home, away, league, ho, draw_o, ao) {
 }
 
 // Load sidebar on init
-(function() {
-    var origInit = init;
-    init = async function() {
-        try {
-            console.log("INIT STARTED");
-            await origInit();
-        } catch(e) {
-            console.error("INIT ERROR:", e);
-        }
-        console.log("ORIG INIT DONE, loading sidebar...");
-        loadSidebar().catch(function(e) { console.error("sidebar error:", e); });
-        loadWcMatches().catch(function(e) { console.error("wc error:", e); });
-    };
-    // Also start sidebar loading immediately (don't wait for init chain)
-    loadSidebar().catch(function(e) { console.error("sidebar early error:", e); });
-    loadWcMatches().catch(function(e) { console.error("wc early error:", e); });
-    init();
-})();
+var origInit = init;
+init = async function() {
+    await origInit();
+    loadSidebar();
+    loadWcMatches();
+};
+
+// Start
+init();

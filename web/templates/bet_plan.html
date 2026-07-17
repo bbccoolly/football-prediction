@@ -1,0 +1,241 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>竞彩投注分析 — 足球预测系统</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+/* Betting page specific styles */
+.bet-page { max-width: 1100px; margin: 0 auto; padding: 20px; }
+.bet-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+.bet-header h1 { font-size: 1.6em; color: #f0c040; margin: 0; }
+.nav-links { display: flex; gap: 12px; }
+.nav-links a { color: #8ab4f8; text-decoration: none; font-size: 0.9em; padding: 4px 10px; border-radius: 4px; }
+.nav-links a:hover { background: #333; }
+.nav-links a.active { color: #f0c040; border-bottom: 2px solid #f0c040; }
+
+.control-panel { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; padding: 16px; background: #1e1e2e; border-radius: 8px; }
+.control-panel label { color: #aaa; font-size: 0.85em; }
+.control-panel input[type="range"] { width: 120px; accent-color: #f0c040; }
+.control-panel .upset-val { color: #f0c040; font-weight: bold; min-width: 30px; }
+.btn { padding: 8px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: 600; }
+.btn-primary { background: #f0c040; color: #1a1a2e; }
+.btn-primary:hover { background: #f5d060; }
+.btn-secondary { background: #333; color: #ccc; }
+.btn-secondary:hover { background: #444; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.summary-card { background: #1e1e2e; border-radius: 8px; padding: 14px; text-align: center; }
+.summary-card .val { font-size: 1.6em; font-weight: bold; color: #f0c040; }
+.summary-card .lbl { font-size: 0.78em; color: #888; margin-top: 4px; }
+.summary-card.warn .val { color: #ff6b6b; }
+
+.bet-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.85em; }
+.bet-table th { background: #1e1e2e; padding: 10px 8px; text-align: left; color: #aaa; font-weight: 600; border-bottom: 2px solid #333; }
+.bet-table td { padding: 8px; border-bottom: 1px solid #2a2a3a; }
+.bet-table tr:hover { background: #1a1a2e; }
+.bet-table .ev-positive { color: #4caf50; }
+.bet-table .ev-strong { color: #f0c040; font-weight: bold; }
+.bet-table .tag-single { display: inline-block; background: #1565c0; color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 0.75em; }
+.bet-table .tag-parlay { display: inline-block; background: #6a1b9a; color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 0.75em; }
+
+.text-output { background: #0d0d1a; border: 1px solid #333; border-radius: 8px; padding: 20px; font-family: "Consolas", "Courier New", monospace; font-size: 0.82em; line-height: 1.5; white-space: pre-wrap; max-height: 600px; overflow-y: auto; color: #ddd; }
+
+.loading { text-align: center; padding: 40px; color: #888; }
+.loading .spinner { width: 40px; height: 40px; border: 4px solid #333; border-top-color: #f0c040; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.progress-bar { height: 4px; background: #333; border-radius: 2px; margin: 20px 0; overflow: hidden; }
+.progress-bar .fill { height: 100%; background: #f0c040; border-radius: 2px; transition: width 0.3s; }
+
+.collapse-header { cursor: pointer; color: #8ab4f8; font-size: 0.95em; padding: 8px 0; user-select: none; }
+.collapse-header:hover { color: #f0c040; }
+.collapse-header::before { content: "▸ "; display: inline-block; transition: transform 0.2s; }
+.collapse-header.open::before { transform: rotate(90deg); }
+.collapse-content { display: none; }
+.collapse-content.open { display: block; }
+</style>
+</head>
+<body>
+<div class="bet-page">
+  <div class="bet-header">
+    <h1>⚽ 竞彩投注智能分析</h1>
+    <div class="nav-links">
+      <a href="/">预测主页</a>
+      <a href="/history">历史记录</a>
+      <a href="/calibrate">校准</a>
+      <a href="/betting" class="active">投注分析</a>
+    </div>
+  </div>
+
+  <div class="control-panel">
+    <label>冷门因子:</label>
+    <input type="range" id="upset-slider" min="5" max="18" value="12" step="1" oninput="updateUpset(this.value)">
+    <span class="upset-val" id="upset-val">0.12</span>
+    <label>本金:</label>
+    <input type="number" id="budget-input" value="100" min="10" max="10000" step="10" style="width:70px;background:#2a2a3a;border:1px solid #444;color:#f0c040;padding:4px 8px;border-radius:4px;font-size:0.9em;"> 元
+    <label style="margin-left:8px">
+      <input type="checkbox" id="use-sample" checked> 示例数据
+    </label>
+    <button class="btn btn-primary" id="btn-analyze" onclick="runAnalysis()">▶ 开始分析</button>
+    <button class="btn btn-secondary" id="btn-fetch" onclick="fetchMatches()">↻ 刷新数据</button>
+  </div>
+
+  <div id="progress-bar" class="progress-bar" style="display:none"><div class="fill" style="width:0%"></div></div>
+
+  <div id="summary-section" style="display:none">
+    <h3 style="color:#aaa;margin-bottom:8px">分析摘要</h3>
+    <div class="summary-cards" id="summary-cards"></div>
+  </div>
+
+  <div id="bet-table-section" style="display:none">
+    <div class="collapse-header open" onclick="toggleSection(this, 'bet-table-wrap')">投注明细</div>
+    <div id="bet-table-wrap" class="collapse-content open">
+      <table class="bet-table" id="bet-table">
+        <thead><tr><th>#</th><th>类型</th><th>场次</th><th>投注内容</th><th>金额</th><th>注数</th><th>赔率</th><th>预期回报</th><th>EV%</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="text-section" style="display:none;margin-top:20px">
+    <div class="collapse-header" onclick="toggleSection(this, 'text-wrap')">完整分析报告</div>
+    <div id="text-wrap" class="collapse-content">
+      <div class="text-output" id="text-output"></div>
+    </div>
+  </div>
+
+  <div id="loading-section" class="loading" style="display:none">
+    <div class="spinner"></div>
+    <p id="loading-msg">正在分析...</p>
+  </div>
+</div>
+
+<script>
+let currentBets = [];
+
+function updateUpset(val) {
+  document.getElementById("upset-val").textContent = (val/100).toFixed(2);
+}
+
+function toggleSection(header, targetId) {
+  header.classList.toggle("open");
+  document.getElementById(targetId).classList.toggle("open");
+}
+
+async function runAnalysis() {
+  const upset = parseInt(document.getElementById("upset-slider").value) / 100;
+  const useSample = document.getElementById("use-sample").checked;
+  const budget = parseInt(document.getElementById("budget-input").value) || 100;
+  
+  const loading = document.getElementById("loading-section");
+  const msg = document.getElementById("loading-msg");
+  const bar = document.getElementById("progress-bar");
+  const fill = bar.querySelector(".fill");
+  
+  loading.style.display = "block";
+  bar.style.display = "block";
+  fill.style.width = "20%";
+  msg.textContent = "正在抓取赔率数据...";
+  
+  document.getElementById("summary-section").style.display = "none";
+  document.getElementById("bet-table-section").style.display = "none";
+  document.getElementById("text-section").style.display = "none";
+  
+  try {
+    fill.style.width = "40%";
+    msg.textContent = "正在计算算法概率...";
+    
+    const resp = await fetch("/api/betting/analyze", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ upset, use_sample: useSample, budget: budget })
+    });
+    
+    fill.style.width = "80%";
+    msg.textContent = "正在生成投注方案...";
+    
+    const data = await resp.json();
+    
+    fill.style.width = "100%";
+    
+    if (!data.ok) {
+      msg.innerHTML = `<span style="color:#ff6b6b">错误: ${data.error}</span>`;
+      setTimeout(() => loading.style.display = "none", 3000);
+      return;
+    }
+    
+    // 填充摘要卡片
+    const cards = document.getElementById("summary-cards");
+    cards.innerHTML = `
+      <div class="summary-card"><div class="val">${data.match_count}</div><div class="lbl">分析场次</div></div>
+      <div class="summary-card"><div class="val">${data.candidates}</div><div class="lbl">+EV候选项</div></div>
+      <div class="summary-card"><div class="val">${data.bet_count}</div><div class="lbl">采纳投注</div></div>
+      <div class="summary-card"><div class="val">${data.single_count}</div><div class="lbl">单关投注</div></div>
+      <div class="summary-card"><div class="val">${data.parlay_count}</div><div class="lbl">串关投注</div></div>
+      <div class="summary-card"><div class="val">${data.total_stake}元</div><div class="lbl">总投注额</div></div>
+      <div class="summary-card"><div class="val">${data.total_return}元</div><div class="lbl">预期总回报</div></div>
+    `;
+    document.getElementById("summary-section").style.display = "block";
+    
+    // 填充投注表格
+    currentBets = data.bets;
+    const tbody = document.querySelector("#bet-table tbody");
+    tbody.innerHTML = "";
+    data.bets.forEach((b, i) => {
+      const evClass = b.ev_pct > 30 ? "ev-strong" : (b.ev_pct > 0 ? "ev-positive" : "");
+      const tag = b.is_single
+        ? '<span class="tag-single">单关</span>'
+        : '<span class="tag-parlay">串关</span>';
+      tbody.innerHTML += `
+        <tr>
+          <td>${i+1}</td>
+          <td>${tag}</td>
+          <td>${b.id}</td>
+          <td>${b.desc}</td>
+          <td>${b.stake}元</td>
+          <td>${b.zhu}注</td>
+          <td>${b.odds.toFixed(2)}</td>
+          <td>${b.ret}元</td>
+          <td class="${evClass}">${b.ev_pct > 0 ? "+" : ""}${b.ev_pct}%</td>
+        </tr>`;
+    });
+    document.getElementById("bet-table-section").style.display = "block";
+    
+    // 填充文本报告
+    document.getElementById("text-output").textContent = data.text;
+    document.getElementById("text-section").style.display = "block";
+    
+    loading.style.display = "none";
+    bar.style.display = "none";
+    
+  } catch (e) {
+    msg.innerHTML = `<span style="color:#ff6b6b">网络错误: ${e.message}</span>`;
+    setTimeout(() => loading.style.display = "none", 3000);
+  }
+}
+
+async function fetchMatches() {
+  const btn = document.getElementById("btn-fetch");
+  btn.disabled = true;
+  btn.textContent = "抓取中...";
+  try {
+    const resp = await fetch("/api/betting/matches");
+    const data = await resp.json();
+    alert(`已加载 ${data.count} 场比赛` + (data.fallback ? " (示例数据)" : ""));
+  } catch (e) {
+    alert("抓取失败: " + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = "↻ 刷新数据";
+}
+
+// 初始加载比赛数据
+fetch("/api/betting/matches").then(r => r.json()).then(d => {
+  console.log("Loaded", d.count, "matches");
+});
+</script>
+</body>
+</html>

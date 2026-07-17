@@ -1,0 +1,117 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>历史追踪 · 算法校准报告</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-content">
+      <div class="logo-area"><span class="logo-icon">⚽</span><h1>足球比赛预测系统</h1></div>
+      <span class="badge">12 算法 · 已校准</span>
+    </div>
+    <nav>
+      <a href="/">🔮 比赛预测</a>
+      <a href="/history" class="active">📈 校准报告</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="card" id="calibrationCard">
+      <h2>📊 算法回测校准报告</h2>
+      <p class="muted" id="calibMeta">加载中...</p>
+      <div class="chart-container bar-wrap"><canvas id="accuracyChart"></canvas></div>
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead><tr><th>模型</th><th>测试场次</th><th>准确率</th><th>Brier Score</th><th>校准权重</th></tr></thead>
+          <tbody id="calibTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📈 ELO 排名 TOP 20</h2>
+      <div id="rankings" class="rankings-list"><p>加载中...</p></div>
+    </div>
+  </main>
+</div>
+
+<script>
+// 加载校准数据
+fetch("/api/calibration")
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      document.getElementById("calibMeta").textContent = data.error;
+      return;
+    }
+    document.getElementById("calibMeta").textContent =
+      "基于 " + data.total_matches + " 场真实比赛回测 · 校准时间: " + (data.calibrated_at || "").slice(0,16);
+
+    const report = data.report || {};
+    const weights = data.weights || {};
+
+    const names = {poisson:"泊松分布",dixon_coles:"Dixon-Coles",elo:"ELO评级",massey:"Massey排名",form:"近期状态",head_to_head:"交锋记录",market_odds:"市场赔率",knn:"KNN相似",xgboost:"XGBoost",neural_net:"神经网络",monte_carlo:"蒙特卡洛",bayesian:"贝叶斯层次"};
+
+    // Table
+    let html = "";
+    const sorted = Object.entries(report).sort((a,b) => b[1].accuracy - a[1].accuracy);
+    for (const [name, r] of sorted) {
+      const w = weights[name] ? (weights[name]*100).toFixed(1) : "-";
+      html += `<tr>
+        <td class="model-name">${names[name]||name}</td>
+        <td>${r.matches}</td>
+        <td><b>${r.accuracy}%</b></td>
+        <td>${r.brier}</td>
+        <td>${w}%</td>
+      </tr>`;
+    }
+    document.getElementById("calibTable").innerHTML = html;
+
+    // Chart
+    const ctx = document.getElementById("accuracyChart").getContext("2d");
+    new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: sorted.map(([n]) => names[n]||n),
+        datasets: [{
+          label: "准确率 (%)",
+          data: sorted.map(([,r]) => r.accuracy),
+          backgroundColor: sorted.map(([,r]) => r.accuracy >= 40 ? "rgba(74,222,128,0.4)" : "rgba(248,113,113,0.3)"),
+          borderColor: sorted.map(([,r]) => r.accuracy >= 40 ? "#4ade80" : "#f87171"),
+          borderWidth: 1,
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        plugins: { legend: { labels: { color: "#94a3b8" } } },
+        scales: {
+          x: { min: 20, max: 55, ticks: { color: "#94a3b8", callback: v => v+"%" }, grid: { color: "#1e293b" } },
+          y: { ticks: { color: "#94a3b8", font: { size: 11 } }, grid: { color: "#1e293b" } }
+        }
+      }
+    });
+  })
+  .catch(e => {
+    document.getElementById("calibMeta").textContent = "加载失败: " + e.message;
+  });
+
+// ELO rankings
+fetch("/api/rankings")
+  .then(r => r.json())
+  .then(data => {
+    let html = "";
+    data.forEach(([team, elo], i) => {
+      html += `<div class="rank-row"><span class="rank-num">#${i+1}</span><span class="rank-team">${team}</span><span class="rank-elo">${elo.toFixed(0)}</span></div>`;
+    });
+    document.getElementById("rankings").innerHTML = html;
+  });
+</script>
+</body>
+</html>

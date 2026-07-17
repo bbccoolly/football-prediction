@@ -1,117 +1,384 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>历史追踪 · 算法校准报告</title>
-<link rel="stylesheet" href="/static/css/style.css">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>历史数据中心 · 足球预测</title>
+<link rel="stylesheet" href="/static/css/style.css?v=2">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  .dc-layout { display: flex; gap: 16px; max-width: 1320px; margin: 0 auto; padding: 12px 16px; }
+  .dc-main { flex: 1; min-width: 0; }
+  .dc-side { width: 300px; flex-shrink: 0; }
+  @media (max-width: 900px) { .dc-layout { flex-direction: column; } .dc-side { width: 100%; } }
+  .tab-bar { display: flex; gap: 3px; margin-bottom: 16px; background: var(--bg-input,#1a1f2e); border-radius: 10px; padding: 3px; }
+  .tab-btn { flex: 1; padding: 9px 6px; border: none; border-radius: 8px; cursor: pointer; font-size: .76rem; font-weight: 600; background: transparent; color: var(--text-dim,#94a3b8); transition: all .2s; white-space: nowrap; }
+  .tab-btn.active { background: var(--bg-card,#111827); color: var(--text,#e2e8f0); box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+  .tab-btn:hover:not(.active) { color: var(--text,#e2e8f0); }
+  .search-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .search-row input, .search-row select { padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border,#334155); background: var(--bg-input,#1a1f2e); color: var(--text,#e2e8f0); font-size: .78rem; }
+  .search-row input { flex: 1; min-width: 130px; }
+  .search-row select { min-width: 110px; }
+  .btn-sm { padding: 7px 16px; border-radius: 6px; border: 1px solid var(--green,#22c55e); background: rgba(34,197,94,.1); color: var(--green,#22c55e); cursor: pointer; font-size: .76rem; font-weight: 600; transition: all .15s; }
+  .btn-sm:hover { background: rgba(34,197,94,.2); }
+  .btn-sm.outline { border-color: var(--border,#334155); color: var(--text-dim,#94a3b8); background: transparent; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: .76rem; }
+  .data-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border,#334155); color: var(--text-dim,#94a3b8); font-weight: 600; font-size: .7rem; }
+  .data-table td { padding: 7px 10px; border-bottom: 1px solid rgba(51,65,85,.4); }
+  .data-table tr:hover td { background: rgba(255,255,255,.02); }
+  .page-row { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 14px; }
+  .page-row button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border,#334155); background: var(--bg-input,#1a1f2e); color: var(--text,#e2e8f0); cursor: pointer; font-size: .74rem; }
+  .page-row button:disabled { opacity: .4; cursor: default; }
+  .page-row span { font-size: .74rem; color: var(--text-dim,#94a3b8); }
+  .rank-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; margin-bottom: 3px; border: 1px solid transparent; }
+  .rank-item:hover { border-color: var(--border,#334155); background: rgba(255,255,255,.02); }
+  .rank-num { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%; font-size: .68rem; font-weight: 700; background: var(--bg-input,#1a1f2e); flex-shrink: 0; }
+  .rank-num.gold { background: rgba(234,179,8,.15); color: #eab308; }
+  .rank-num.silver { background: rgba(148,163,184,.15); color: #94a3b8; }
+  .rank-num.bronze { background: rgba(251,146,60,.15); color: #fb923c; }
+  .rank-name { flex: 1; font-weight: 600; font-size: .76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-elo { font-size: .72rem; color: var(--green,#22c55e); font-weight: 700; }
+  .trend-chart-wrap { height: 280px; margin: 12px 0; }
+  .trend-stats { display: flex; gap: 10px; text-align: center; flex-wrap: wrap; }
+  .trend-stats > div { flex: 1; min-width: 50px; padding: 8px; border-radius: 8px; background: var(--bg-input,#1a1f2e); }
+  .trend-stats .lbl { font-size: .65rem; color: var(--text-dim,#94a3b8); margin-bottom: 2px; }
+  .trend-stats .val { font-weight: 700; font-size: .95rem; }
+  .h2h-card { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border,#334155); margin-bottom: 6px; background: var(--bg-input,#1a1f2e); }
+  .h2h-card .teams { font-weight: 700; font-size: .82rem; }
+  .h2h-card .info { font-size: .68rem; color: var(--text-dim,#94a3b8); margin-top: 3px; }
+  .h2h-summary { display: flex; gap: 10px; margin-bottom: 12px; text-align: center; }
+  .h2h-summary > div { flex: 1; padding: 8px; border-radius: 8px; }
+  .h2h-summary .lbl { font-size: .7rem; color: var(--text-dim); }
+  .h2h-summary .val { font-size: 1.2rem; font-weight: 700; }
+  .loading-text { text-align: center; padding: 40px; color: var(--text-dim,#94a3b8); }
+  .empty-text { text-align: center; padding: 30px; color: var(--text-muted,#64748b); font-size: .78rem; }
+  .badge-sm { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: .64rem; font-weight: 600; }
+  .bg-green { background: rgba(34,197,94,.15); color: #22c55e; }
+  .bg-amber { background: rgba(245,158,11,.15); color: #f59e0b; }
+  .score { font-weight: 700; }
+  .sc-win { color: #22c55e; }
+  .sc-lose { color: #ef4444; }
+  .sc-draw { color: #f59e0b; }
+</style>
 </head>
 <body>
-<div class="app">
-  <header class="header">
-    <div class="header-content">
-      <div class="logo-area"><span class="logo-icon">⚽</span><h1>足球比赛预测系统</h1></div>
-      <span class="badge">12 算法 · 已校准</span>
-    </div>
-    <nav>
-      <a href="/">🔮 比赛预测</a>
-      <a href="/history" class="active">📈 校准报告</a>
-    </nav>
-  </header>
-
-  <main>
-    <div class="card" id="calibrationCard">
-      <h2>📊 算法回测校准报告</h2>
-      <p class="muted" id="calibMeta">加载中...</p>
-      <div class="chart-container bar-wrap"><canvas id="accuracyChart"></canvas></div>
-      <div class="table-wrap" style="margin-top:16px">
-        <table>
-          <thead><tr><th>模型</th><th>测试场次</th><th>准确率</th><th>Brier Score</th><th>校准权重</th></tr></thead>
-          <tbody id="calibTable"></tbody>
-        </table>
+<div class="dc-layout">
+  <div class="dc-main">
+    <header class="header" style="margin-bottom:14px">
+      <div class="header-left">
+        <div class="header-icon">&#x1F4CA;</div>
+        <div><h1>历史数据中心</h1><div class="header-sub">比赛记录 · 交锋查询 · 球队趋势 · ELO排名</div></div>
       </div>
+      <div class="header-actions">
+        <a href="/" class="btn-ghost">&#x1F52E; 预测</a>
+        <a href="/history" class="btn-ghost active">&#x1F4C8; 历史</a>
+        <a href="/betting" class="btn-ghost">&#x1F4B5; 投注</a>
+        <a href="/calibrate" class="btn-ghost">&#x1F52C; 校准</a>
+        <a href="/lottery" class="btn-ghost">&#x1F3B0; 彩票</a>
+      </div>
+    </header>
+
+    <div class="tab-bar" id="tabBar">
+      <button class="tab-btn active" data-tab="matches">&#x1F4CB; 比赛记录</button>
+      <button class="tab-btn" data-tab="h2h">&#x2694; 交锋查询</button>
+      <button class="tab-btn" data-tab="trend">&#x1F4C8; 球队趋势</button>
+      <button class="tab-btn" data-tab="rankings">&#x1F3C6; ELO排名</button>
+      <button class="tab-btn" data-tab="calibration">&#x1F52C; 校准报告</button>
     </div>
 
-    <div class="card">
-      <h2>📈 ELO 排名 TOP 20</h2>
-      <div id="rankings" class="rankings-list"><p>加载中...</p></div>
+    <!-- MATCHES -->
+    <div class="card tab-panel" id="panel-matches">
+      <div class="card-head"><h2>&#x1F4CB; 比赛记录 <span style="font-weight:400;font-size:.72rem;color:var(--text-dim)" id="matchCount"></span></h2></div>
+      <div class="search-row">
+        <select id="leagueFilter"><option value="">全部联赛</option></select>
+        <input type="text" id="teamFilter" placeholder="搜索球队名...">
+        <button class="btn-sm" onclick="loadMatches(1)">&#x1F50D; 搜索</button>
+      </div>
+      <div style="overflow-x:auto"><table class="data-table">
+        <thead><tr><th>日期</th><th>联赛</th><th>主队</th><th>比分</th><th>客队</th></tr></thead>
+        <tbody id="matchTableBody"><tr><td colspan="5" class="loading-text">加载中...</td></tr></tbody>
+      </table></div>
+      <div class="page-row" id="matchPager"></div>
     </div>
-  </main>
+
+    <!-- H2H -->
+    <div class="card tab-panel" id="panel-h2h" style="display:none">
+      <div class="card-head"><h2>&#x2694; 历史交锋查询</h2></div>
+      <div class="search-row">
+        <input type="text" id="h2hTeamA" placeholder="球队A (如 巴西)">
+        <span style="color:var(--text-dim);font-weight:700;font-size:.8rem">VS</span>
+        <input type="text" id="h2hTeamB" placeholder="球队B (如 阿根廷)">
+        <button class="btn-sm" onclick="loadH2H()">&#x1F50D; 查询</button>
+      </div>
+      <div id="h2hResult"><div class="empty-text">请选择两支球队查询交锋记录</div></div>
+    </div>
+
+    <!-- TREND -->
+    <div class="card tab-panel" id="panel-trend" style="display:none">
+      <div class="card-head"><h2>&#x1F4C8; 球队趋势分析</h2></div>
+      <div class="search-row">
+        <input type="text" id="trendTeam" placeholder="输入球队名 (如 巴西)">
+        <select id="trendN"><option value="10">近10场</option><option value="20" selected>近20场</option><option value="30">近30场</option><option value="50">近50场</option></select>
+        <button class="btn-sm" onclick="loadTrend()">&#x1F4C8; 分析</button>
+      </div>
+      <div class="trend-stats" id="trendStats"><div class="empty-text" style="width:100%">请选择球队查看趋势</div></div>
+      <div class="trend-chart-wrap"><canvas id="trendChart"></canvas></div>
+    </div>
+
+    <!-- RANKINGS -->
+    <div class="card tab-panel" id="panel-rankings" style="display:none">
+      <div class="card-head"><h2>&#x1F3C6; ELO 排名</h2></div>
+      <div class="tab-bar" style="margin-bottom:12px;width:fit-content">
+        <button class="tab-btn active" data-rtype="national" style="flex:none;padding:6px 16px">&#x1F3C6; 国家队</button>
+        <button class="tab-btn" data-rtype="clubs" style="flex:none;padding:6px 16px">&#x1F3DF; 俱乐部</button>
+      </div>
+      <div id="rankingsList"><div class="loading-text">加载中...</div></div>
+    </div>
+
+    <!-- CALIBRATION -->
+    <div class="card tab-panel" id="panel-calibration" style="display:none">
+      <h2>&#x1F52C; 算法回测校准报告</h2>
+      <p class="muted" id="calibMeta" style="font-size:.76rem;margin-bottom:10px">加载中...</p>
+      <div style="height:280px"><canvas id="accuracyChart"></canvas></div>
+      <div style="overflow-x:auto;margin-top:14px"><table class="data-table">
+        <thead><tr><th>模型</th><th>测试场次</th><th>准确率</th><th>Brier</th><th>权重</th></tr></thead>
+        <tbody id="calibTable"></tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <!-- SIDEBAR -->
+  <div class="dc-side">
+    <div class="card" style="position:sticky;top:12px;max-height:calc(100vh - 30px);overflow-y:auto">
+      <div class="card-head"><h2>&#x1F3C6; ELO TOP 20</h2></div>
+      <div id="sidebarRankings"><div class="loading-text" style="font-size:.74rem">加载中...</div></div>
+    </div>
+  </div>
 </div>
 
 <script>
-// 加载校准数据
-fetch("/api/calibration")
-  .then(r => r.json())
-  .then(data => {
-    if (data.error) {
-      document.getElementById("calibMeta").textContent = data.error;
+// ====== TABS ======
+document.getElementById("tabBar").addEventListener("click", function(e) {
+  var btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  document.querySelectorAll("#tabBar .tab-btn").forEach(function(b) { b.classList.remove("active"); });
+  btn.classList.add("active");
+  var tab = btn.dataset.tab;
+  document.querySelectorAll(".tab-panel").forEach(function(p) { p.style.display = "none"; });
+  document.getElementById("panel-" + tab).style.display = "block";
+  if (tab === "matches" && !window._ml) loadMatches(1);
+  if (tab === "rankings" && !window._rl) loadRankingsTab();
+  if (tab === "calibration" && !window._cl) loadCalibration();
+});
+
+// ====== MATCHES ======
+window._ml = false; var allLeagues = [];
+async function loadMatches(page) {
+  var league = document.getElementById("leagueFilter").value;
+  var team = document.getElementById("teamFilter").value.trim();
+  var params = new URLSearchParams({page: page, limit: 30});
+  if (league) params.set("league", league);
+  if (team) params.set("team", team);
+  try {
+    var r = await fetch("/api/history/matches?" + params);
+    var d = await r.json();
+    window._ml = true;
+    if (allLeagues.length === 0 && d.leagues) {
+      allLeagues = d.leagues;
+      var sel = document.getElementById("leagueFilter");
+      d.leagues.forEach(function(l) {
+        var o = document.createElement("option"); o.value = l; o.textContent = l; sel.appendChild(o);
+      });
+    }
+    document.getElementById("matchCount").textContent = "(共 " + d.total + " 场)";
+    var html = "";
+    (d.matches || []).forEach(function(m) {
+      var hg = m.home_goals, ag = m.away_goals;
+      var rc = hg > ag ? "sc-win" : (hg < ag ? "sc-lose" : "sc-draw");
+      html += "<tr><td style='font-size:.7rem;color:var(--text-dim)'>" + (m.date||"") + "</td>" +
+        "<td><span class='badge-sm bg-green'>" + escH(m.league||"") + "</span></td>" +
+        "<td><b>" + escH(m.home_team||"") + "</b></td>" +
+        "<td class='score " + rc + "'>" + (hg!=null?hg:"-") + " - " + (ag!=null?ag:"-") + "</td>" +
+        "<td><b>" + escH(m.away_team||"") + "</b></td></tr>";
+    });
+    if (!d.matches || !d.matches.length) html = "<tr><td colspan='5' class='empty-text'>无匹配结果</td></tr>";
+    document.getElementById("matchTableBody").innerHTML = html;
+    var tp = Math.ceil(d.total / d.per_page);
+    document.getElementById("matchPager").innerHTML =
+      "<button " + (page<=1?"disabled":"") + " onclick='loadMatches(" + (page-1) + ")'>◀ 上一页</button>" +
+      "<span>第 " + page + " / " + tp + " 页</span>" +
+      "<button " + (page>=tp?"disabled":"") + " onclick='loadMatches(" + (page+1) + ")'>下一页 ▶</button>";
+  } catch(e) {
+    document.getElementById("matchTableBody").innerHTML = "<tr><td colspan='5' class='empty-text'>加载失败</td></tr>";
+  }
+}
+
+// ====== H2H ======
+async function loadH2H() {
+  var a = document.getElementById("h2hTeamA").value.trim();
+  var b = document.getElementById("h2hTeamB").value.trim();
+  if (!a || !b) { document.getElementById("h2hResult").innerHTML = "<div class='empty-text'>请输入两支球队名称</div>"; return; }
+  try {
+    var r = await fetch("/api/history/h2h?a=" + encodeURIComponent(a) + "&b=" + encodeURIComponent(b));
+    var d = await r.json();
+    var ms = d.matches || [];
+    if (!ms.length) {
+      document.getElementById("h2hResult").innerHTML = "<div class='empty-text'>未找到交锋记录</div>";
       return;
     }
-    document.getElementById("calibMeta").textContent =
-      "基于 " + data.total_matches + " 场真实比赛回测 · 校准时间: " + (data.calibrated_at || "").slice(0,16);
+    var aW=0, bW=0, dr=0;
+    ms.forEach(function(m) {
+      var hg=m.home_goals||0, ag=m.away_goals||0;
+      if (hg>ag) { if (m.home_team.indexOf(a)>=0||a.indexOf(m.home_team)>=0) aW++; else bW++; }
+      else if (hg<ag) { if (m.away_team.indexOf(a)>=0||a.indexOf(m.away_team)>=0) aW++; else bW++; }
+      else dr++;
+    });
+    var html = "<div class='h2h-summary'>" +
+      "<div style='background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2)'><div class='lbl'>" + escH(a) + "</div><div class='val' style='color:#22c55e'>" + aW + " 胜</div></div>" +
+      "<div style='background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2)'><div class='lbl'>平局</div><div class='val' style='color:#f59e0b'>" + dr + "</div></div>" +
+      "<div style='background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)'><div class='lbl'>" + escH(b) + "</div><div class='val' style='color:#3b82f6'>" + bW + " 胜</div></div>" +
+      "</div><div style='font-size:.72rem;color:var(--text-dim);margin-bottom:8px'>共 " + ms.length + " 场交锋</div>";
+    ms.forEach(function(m) {
+      var hg=m.home_goals||0, ag=m.away_goals||0;
+      var rc = hg>ag?"sc-win":(hg<ag?"sc-lose":"sc-draw");
+      html += "<div class='h2h-card'><div class='teams'>" + escH(m.home_team) + " <span class='score " + rc + "'>" + hg + " - " + ag + "</span> " + escH(m.away_team) + "</div>" +
+        "<div class='info'>" + (m.date||"") + " · " + (m.league||"") + "</div></div>";
+    });
+    document.getElementById("h2hResult").innerHTML = html;
+  } catch(e) { document.getElementById("h2hResult").innerHTML = "<div class='empty-text'>查询失败</div>"; }
+}
 
-    const report = data.report || {};
-    const weights = data.weights || {};
-
-    const names = {poisson:"泊松分布",dixon_coles:"Dixon-Coles",elo:"ELO评级",massey:"Massey排名",form:"近期状态",head_to_head:"交锋记录",market_odds:"市场赔率",knn:"KNN相似",xgboost:"XGBoost",neural_net:"神经网络",monte_carlo:"蒙特卡洛",bayesian:"贝叶斯层次"};
-
-    // Table
-    let html = "";
-    const sorted = Object.entries(report).sort((a,b) => b[1].accuracy - a[1].accuracy);
-    for (const [name, r] of sorted) {
-      const w = weights[name] ? (weights[name]*100).toFixed(1) : "-";
-      html += `<tr>
-        <td class="model-name">${names[name]||name}</td>
-        <td>${r.matches}</td>
-        <td><b>${r.accuracy}%</b></td>
-        <td>${r.brier}</td>
-        <td>${w}%</td>
-      </tr>`;
-    }
-    document.getElementById("calibTable").innerHTML = html;
-
-    // Chart
-    const ctx = document.getElementById("accuracyChart").getContext("2d");
-    new Chart(ctx, {
+// ====== TREND ======
+var trendChart = null;
+async function loadTrend() {
+  var team = document.getElementById("trendTeam").value.trim();
+  var n = parseInt(document.getElementById("trendN").value);
+  if (!team) { document.getElementById("trendStats").innerHTML = "<div class='empty-text' style='width:100%'>请输入球队名称</div>"; return; }
+  try {
+    var r = await fetch("/api/history/trend?team=" + encodeURIComponent(team) + "&n=" + n);
+    var d = await r.json();
+    var td = d.trend || [];
+    if (!td.length) { document.getElementById("trendStats").innerHTML = "<div class='empty-text' style='width:100%'>未找到比赛记录</div>"; return; }
+    var w=0, l=0, dr=0, gf=0, ga=0;
+    td.forEach(function(m) {
+      var hg=m.home_goals||0, ag=m.away_goals||0;
+      var isH = (m.home_team||"").indexOf(team)>=0 || team.indexOf(m.home_team||"")>=0;
+      if (hg>ag) { if (isH) w++; else l++; } else if (hg<ag) { if (isH) l++; else w++; } else dr++;
+      if (isH) { gf+=hg; ga+=ag; } else { gf+=ag; ga+=hg; }
+    });
+    document.getElementById("trendStats").innerHTML =
+      "<div><div class='lbl'>胜</div><div class='val' style='color:#22c55e'>" + w + "</div></div>" +
+      "<div><div class='lbl'>平</div><div class='val' style='color:#f59e0b'>" + dr + "</div></div>" +
+      "<div><div class='lbl'>负</div><div class='val' style='color:#ef4444'>" + l + "</div></div>" +
+      "<div><div class='lbl'>进球</div><div class='val'>" + gf + "</div></div>" +
+      "<div><div class='lbl'>失球</div><div class='val'>" + ga + "</div></div>" +
+      "<div><div class='lbl'>胜率</div><div class='val' style='color:" + (w/td.length>=.5?"#22c55e":"#ef4444") + "'>" + (w/td.length*100).toFixed(0) + "%</div></div>";
+    var rev = td.slice().reverse();
+    var labels = [], gdData = [];
+    rev.forEach(function(m) {
+      labels.push((m.date||"").slice(5));
+      var hg=m.home_goals||0, ag=m.away_goals||0;
+      var isH = (m.home_team||"").indexOf(team)>=0 || team.indexOf(m.home_team||"")>=0;
+      gdData.push(isH ? (hg-ag) : (ag-hg));
+    });
+    var ctx = document.getElementById("trendChart").getContext("2d");
+    if (trendChart) trendChart.destroy();
+    trendChart = new Chart(ctx, {
       type: "bar",
-      data: {
-        labels: sorted.map(([n]) => names[n]||n),
-        datasets: [{
-          label: "准确率 (%)",
-          data: sorted.map(([,r]) => r.accuracy),
-          backgroundColor: sorted.map(([,r]) => r.accuracy >= 40 ? "rgba(74,222,128,0.4)" : "rgba(248,113,113,0.3)"),
-          borderColor: sorted.map(([,r]) => r.accuracy >= 40 ? "#4ade80" : "#f87171"),
-          borderWidth: 1,
-          borderRadius: 4,
-        }]
-      },
-      options: {
-        indexAxis: "y",
-        responsive: true,
-        plugins: { legend: { labels: { color: "#94a3b8" } } },
-        scales: {
-          x: { min: 20, max: 55, ticks: { color: "#94a3b8", callback: v => v+"%" }, grid: { color: "#1e293b" } },
-          y: { ticks: { color: "#94a3b8", font: { size: 11 } }, grid: { color: "#1e293b" } }
-        }
+      data: { labels: labels, datasets: [{
+        label: "净胜球", data: gdData,
+        backgroundColor: gdData.map(function(v) { return v>0?"rgba(34,197,94,.6)":(v<0?"rgba(239,68,68,.6)":"rgba(148,163,184,.4)"); }),
+        borderColor: gdData.map(function(v) { return v>0?"#22c55e":(v<0?"#ef4444":"#94a3b8"); }), borderWidth: 1
+      }]},
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { color: "#94a3b8", font: { size: 9 } } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(51,65,85,.3)" } } }
       }
     });
-  })
-  .catch(e => {
-    document.getElementById("calibMeta").textContent = "加载失败: " + e.message;
-  });
+  } catch(e) { document.getElementById("trendStats").innerHTML = "<div class='empty-text' style='width:100%'>加载失败</div>"; }
+}
 
-// ELO rankings
-fetch("/api/rankings")
-  .then(r => r.json())
-  .then(data => {
-    let html = "";
-    data.forEach(([team, elo], i) => {
-      html += `<div class="rank-row"><span class="rank-num">#${i+1}</span><span class="rank-team">${team}</span><span class="rank-elo">${elo.toFixed(0)}</span></div>`;
-    });
-    document.getElementById("rankings").innerHTML = html;
+// ====== RANKINGS ======
+window._rl = false;
+function loadRankingsTab() {
+  window._rl = true;
+  loadRanks("national", "rankingsList");
+  document.querySelectorAll("#panel-rankings .tab-btn").forEach(function(btn) {
+    btn.onclick = function() {
+      document.querySelectorAll("#panel-rankings .tab-btn").forEach(function(b) { b.classList.remove("active"); });
+      this.classList.add("active");
+      loadRanks(this.dataset.rtype, "rankingsList");
+    };
   });
+}
+async function loadRanks(type, cid) {
+  try {
+    var r = await fetch("/api/rankings"); var d = await r.json();
+    var list = type === "clubs" ? (d.clubs||[]) : (d.national||[]);
+    var html = "";
+    list.slice(0, 50).forEach(function(t, i) {
+      var cls = i===0?"gold":(i===1?"silver":(i===2?"bronze":""));
+      html += "<div class='rank-item'><span class='rank-num " + cls + "'>" + (i+1) + "</span>" +
+        "<span class='rank-name'>" + escH(t.team||t.name||"") + "</span>" +
+        "<span class='rank-elo'>" + (t.elo||t.rating||"") + "</span></div>";
+    });
+    document.getElementById(cid).innerHTML = html || "<div class='empty-text'>暂无数据</div>";
+  } catch(e) { document.getElementById(cid).innerHTML = "<div class='empty-text'>加载失败</div>"; }
+}
+
+// ====== CALIBRATION ======
+window._cl = false;
+async function loadCalibration() {
+  window._cl = true;
+  try {
+    var r = await fetch("/api/calibration"); var data = await r.json();
+    if (data.error) { document.getElementById("calibMeta").textContent = data.error; return; }
+    document.getElementById("calibMeta").textContent = "基于 " + data.total_matches + " 场真实比赛回测 · 校准时间: " + (data.calibrated_at||"").slice(0,16);
+    var report = data.report || {}, weights = data.weights || {};
+    var names = {poisson:"泊松分布",dixon_coles:"Dixon-Coles",elo:"ELO评级",massey:"Massey排名",form:"近期状态",head_to_head:"交锋记录",market_odds:"市场赔率",knn:"KNN相似",xgboost:"XGBoost",neural_net:"神经网络",monte_carlo:"蒙特卡洛",bayesian:"贝叶斯层次"};
+    var html = "";
+    var sorted = Object.entries(report).sort(function(a,b) { return b[1].accuracy - a[1].accuracy; });
+    sorted.forEach(function(e) {
+      var nm=e[0], rr=e[1];
+      var w = weights[nm] ? (weights[nm]*100).toFixed(1) : "-";
+      html += "<tr><td>" + (names[nm]||nm) + "</td><td>" + rr.matches + "</td><td><b>" + rr.accuracy + "%</b></td><td>" + rr.brier + "</td><td>" + w + "%</td></tr>";
+    });
+    document.getElementById("calibTable").innerHTML = html;
+    var ctx = document.getElementById("accuracyChart").getContext("2d");
+    new Chart(ctx, {
+      type: "bar",
+      data: { labels: sorted.map(function(e) { return names[e[0]]||e[0]; }), datasets: [{
+        label: "准确率 %", data: sorted.map(function(e) { return e[1].accuracy; }),
+        backgroundColor: "rgba(34,197,94,.5)", borderColor: "#22c55e", borderWidth: 1, borderRadius: 4
+      }]},
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { color: "#94a3b8", font: { size: 10 } } }, y: { ticks: { color: "#94a3b8", callback: function(v) { return v+"%"; } }, grid: { color: "rgba(51,65,85,.3)" }, min: 0, max: 100 } }
+      }
+    });
+  } catch(e) { document.getElementById("calibMeta").textContent = "加载失败"; }
+}
+
+// ====== SIDEBAR RANKINGS ======
+(async function() {
+  try {
+    var r = await fetch("/api/rankings"); var d = await r.json();
+    var list = d.national || [];
+    var html = "";
+    list.slice(0, 20).forEach(function(t, i) {
+      var cls = i===0?"gold":(i===1?"silver":(i===2?"bronze":""));
+      html += "<div class='rank-item'><span class='rank-num " + cls + "'>" + (i+1) + "</span>" +
+        "<span class='rank-name' style='font-size:.74rem'>" + escH(t.team||t.name||"") + "</span>" +
+        "<span class='rank-elo' style='font-size:.68rem'>" + (t.elo||t.rating||"") + "</span></div>";
+    });
+    document.getElementById("sidebarRankings").innerHTML = html || "<div class='empty-text'>暂无</div>";
+  } catch(e) { document.getElementById("sidebarRankings").innerHTML = "<div class='empty-text'>加载失败</div>"; }
+})();
+
+// ====== INIT ======
+loadMatches(1);
+
+function escH(s) { if (!s) return ""; return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 </script>
 </body>
 </html>

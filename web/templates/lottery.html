@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>🎰 体彩开奖与预测</title>
+<link rel="stylesheet" href="/static/css/style.css?v=9">
+<style>
+.lottery-wrap { max-width: 1060px; margin: 0 auto; padding: 16px 16px 40px; }
+.top-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 18px; flex-wrap: wrap; gap: 10px;
+}
+.top-bar .back-link { color: #888; text-decoration: none; font-size: .8rem; display: flex; align-items: center; gap: 4px; }
+.top-bar .back-link:hover { color: #22c55e; }
+.top-bar h1 { font-size: 1.3rem; margin: 0; font-weight: 800; }
+.top-bar .subtitle { font-size: .72rem; color: #666; }
+
+/* ===== 双栏布局 ===== */
+.main-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 860px) { .main-layout { grid-template-columns: 1fr; } }
+
+/* ===== SECTION 标题 ===== */
+.section-title {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+  padding-bottom: 10px; border-bottom: 2px solid #22c55e;
+}
+.section-title h2 { font-size: 1.05rem; margin: 0; }
+.section-title .icon { font-size: 1.4rem; }
+
+/* ===== 开奖结果左栏 ===== */
+.result-card {
+  background: #111827; border: 1px solid #1e2d45; border-radius: 10px;
+  padding: 14px; margin-bottom: 10px; transition: border-color .2s;
+}
+.result-card:hover { border-color: #333; }
+.result-card .r-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.result-card .r-name { font-size: .82rem; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.result-card .r-term { font-size: .65rem; color: #666; }
+.result-card .r-term b { color: #22c55e; }
+
+.ball-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.ball {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .82rem; font-weight: 800; color: #fff;
+}
+.ball.red { background: linear-gradient(135deg, #ef4444, #dc2626); box-shadow: 0 2px 6px rgba(239,68,68,.3); }
+.ball.blue { background: linear-gradient(135deg, #3b82f6, #2563eb); box-shadow: 0 2px 6px rgba(59,130,246,.3); }
+.ball.orange { background: linear-gradient(135deg, #f59e0b, #d97706); box-shadow: 0 2px 6px rgba(245,158,11,.3); }
+.ball.green { background: linear-gradient(135deg, #22c55e, #16a34a); box-shadow: 0 2px 6px rgba(34,197,94,.3); }
+
+.r-meta { font-size: .65rem; color: #666; margin-top: 8px; display: flex; gap: 12px; flex-wrap: wrap; }
+.r-meta .val { color: #f59e0b; font-weight: 600; }
+
+/* ===== 预测右栏 ===== */
+.predict-type-bar {
+  display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.pt-btn {
+  padding: 7px 14px; border-radius: 7px; border: 1px solid #1e2d45;
+  background: #111827; color: #94a3b8; cursor: pointer;
+  font-size: .76rem; font-weight: 600; font-family: inherit;
+  display: flex; align-items: center; gap: 5px; transition: all .2s;
+}
+.pt-btn:hover { border-color: #22c55e; color: #22c55e; }
+.pt-btn.active {
+  border-color: #22c55e; background: rgba(34,197,94,.12);
+  color: #22c55e; box-shadow: 0 0 10px rgba(34,197,94,.15);
+}
+
+.analysis-card {
+  background: #111827; border: 1px solid #1e2d45; border-radius: 10px;
+  padding: 14px; margin-bottom: 10px;
+}
+.analysis-card h4 { font-size: .78rem; margin: 0 0 10px; color: #aaa; display: flex; align-items: center; gap: 6px; }
+
+.tag-row { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; }
+.tag {
+  padding: 3px 9px; border-radius: 10px; font-size: .66rem; font-weight: 600;
+}
+.tag.hot { background: rgba(239,68,68,.15); color: #f87171; }
+.tag.cold { background: rgba(59,130,246,.15); color: #60a5fa; }
+.tag.miss { background: rgba(139,92,246,.15); color: #a78bfa; }
+
+/* 频率柱状图 */
+.freq-chart { display: flex; gap: 3px; align-items: flex-end; min-height: 40px; flex-wrap: wrap; margin-top: 6px; }
+.freq-bar { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 24px; }
+.freq-bar .bar { width: 22px; border-radius: 3px 3px 0 0; min-height: 3px; }
+.freq-bar .bar.hot-bar { background: linear-gradient(180deg, #ef4444, #dc2626); }
+.freq-bar .bar.warm-bar { background: linear-gradient(180deg, #f59e0b, #d97706); }
+.freq-bar .bar.cold-bar { background: linear-gradient(180deg, #3b82f6, #2563eb); }
+.freq-bar .num { font-size: .58rem; color: #777; }
+.freq-bar .val { font-size: .55rem; color: #555; }
+
+/* 预测号码 */
+.prediction-set {
+  display: flex; gap: 8px; align-items: center; padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(34,197,94,.08), rgba(59,130,246,.05));
+  border: 1px solid rgba(34,197,94,.18); border-radius: 8px;
+  margin-bottom: 6px;
+}
+.prediction-set .set-label { font-size: .68rem; color: #555; font-weight: 700; min-width: 26px; }
+.prediction-set .pred-balls { display: flex; gap: 5px; }
+.prediction-set .pball {
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .74rem; font-weight: 800; color: #fff;
+}
+
+.btn-refresh {
+  padding: 7px 16px; border-radius: 7px; border: 1px solid #1e2d45;
+  background: #111827; color: #94a3b8; cursor: pointer;
+  font-size: .74rem; font-weight: 600; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 6px; transition: all .2s;
+}
+.btn-refresh:hover { border-color: #22c55e; color: #22c55e; }
+
+.loading-text { text-align: center; padding: 30px; color: #666; }
+.error-text { text-align: center; padding: 30px; color: #ef4444; }
+
+.disclaimer {
+  margin-top: 8px; padding: 10px 14px;
+  background: rgba(239,68,68,.06); border: 1px solid rgba(239,68,68,.12);
+  border-radius: 8px; font-size: .65rem; color: #777; text-align: center;
+}
+.btn-refresh:hover { background: #22c55e; color: #fff; transform: scale(1.02); }
+.btn-refresh:active { transform: scale(0.96); }
+
+@keyframes regenFlash {
+  0%   { filter: brightness(2.2); }
+  100% { filter: brightness(1); }
+}
+#predictPanel.regen-done .pball { animation: regenFlash 0.55s ease-out; }
+</style>
+</head>
+<body>
+<div class="lottery-wrap">
+
+  <!-- 顶部 -->
+  <div class="top-bar">
+    <div>
+      <a href="/" class="back-link">← 返回足球预测</a>
+      <h1>🎰 体彩数据中心</h1>
+      <div class="subtitle">超级大乐透 · 七星彩 · 排列三 · 排列五</div>
+    </div>
+  </div>
+
+  <!-- 双栏主体 -->
+  <div class="main-layout">
+
+    <!-- ========== 左栏：开奖结果 ========== -->
+    <div>
+      <div class="section-title">
+        <span class="icon">📋</span><h2>最新开奖结果</h2>
+      </div>
+      <div id="resultPanel">
+        <div class="loading-text">加载中...</div>
+      </div>
+      <div style="margin-top:8px;text-align:right">
+        <button class="btn-refresh" onclick="refreshAllData()" style="font-size:.7rem;padding:5px 12px">🔄 刷新开奖数据</button>
+      </div>
+    </div>
+
+    <!-- ========== 右栏：预测分析 ========== -->
+    <div>
+      <div class="section-title">
+        <span class="icon">🔮</span><h2>智能预测分析</h2>
+      </div>
+
+      <!-- 彩种选择 -->
+      <div class="predict-type-bar">
+        <button class="pt-btn active" data-key="dlt" onclick="doPredict('dlt')">🎱 大乐透</button>
+        <button class="pt-btn" data-key="qxc" onclick="doPredict('qxc')">🌟 七星彩</button>
+        <button class="pt-btn" data-key="pls" onclick="doPredict('pls')">🎯 排列三</button>
+        <button class="pt-btn" data-key="plw" onclick="doPredict('plw')">🎲 排列五</button>
+      </div>
+
+      <div id="predictPanel">
+        <div class="loading-text" style="font-size:.8rem;color:#555">👆 点击上方彩种开始预测分析</div>
+      </div>
+
+      <div class="disclaimer">
+        ⚠ 彩票开奖为随机事件，本系统仅基于历史数据统计分析，不保证预测准确性。理性购彩，量力而行。
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ==================== 开奖结果 ====================
+var allData = null;
+
+function ballCls(key, total, idx) {
+  if (key === 'dlt') return idx < total - 2 ? 'red' : 'blue';
+  if (key === 'qxc') return 'orange';
+  return 'green';
+}
+
+async function loadResults() {
+  var panel = document.getElementById('resultPanel');
+  try {
+    var r = await fetch('/api/lottery');
+    allData = await r.json();
+    if (allData.error) { panel.innerHTML = '<div class="error-text">' + allData.error + '</div>'; return; }
+
+    var order = ['dlt','qxc','pls','plw'];
+    var html = '';
+    for (var i = 0; i < order.length; i++) {
+      var k = order[i];
+      var lot = allData[k];
+      if (!lot || !lot.data || !lot.data.length) continue;
+      var latest = lot.data[0];
+      var nums = latest.numbers || [];
+
+      html += '<div class="result-card">';
+      html += '<div class="r-header">';
+      html += '<span class="r-name">' + lot.icon + ' ' + lot.name + '</span>';
+      html += '<span class="r-term">第 <b>' + (latest.draw_num || '?') + '</b> 期 · ' + (latest.date || '') + '</span>';
+      html += '</div>';
+      html += '<div class="ball-row">';
+      for (var j = 0; j < nums.length; j++) {
+        html += '<span class="ball ' + ballCls(k, nums.length, j) + '">' + nums[j] + '</span>';
+      }
+      html += '</div>';
+      html += '<div class="r-meta">';
+      if (latest.pool_balance) html += '<span>奖池: <span class="val">' + latest.pool_balance + '</span></span>';
+      if (latest.sales) html += '<span>销量: <span class="val">' + latest.sales + '</span></span>';
+      if (latest.number_type) html += '<span>类型: <span class="val">' + latest.number_type + '</span></span>';
+      html += '</div>';
+      html += '</div>';
+    }
+    panel.innerHTML = html;
+  } catch(e) {
+    panel.innerHTML = '<div class="error-text">加载失败: ' + e.message + '</div>';
+  }
+}
+
+// ==================== 预测分析 ====================
+var predCache = {};
+var curKey = 'dlt';
+
+async function doPredict(key, force) {
+  curKey = key;
+  document.querySelectorAll('.pt-btn').forEach(function(b) { b.classList.remove('active'); });
+  document.querySelector('[data-key="' + key + '"]').classList.add('active');
+
+  var panel = document.getElementById('predictPanel');
+
+  // 切换彩种：有缓存直接渲染
+  if (!force && predCache[key]) { renderPredict(key, predCache[key]); return; }
+
+  // 重新生成：静默获取 + 全量刷新（无loading闪烁）
+  if (force && predCache[key]) {
+    try {
+      var r = await fetch('/api/lottery/predict/' + key + '?regen=1');
+      var d = await r.json();
+      if (d.error) return;
+      predCache[key] = d;
+      renderPredict(key, d);
+      panel.classList.add('regen-done');
+      setTimeout(function() { panel.classList.remove('regen-done'); }, 600);
+    } catch(e) {}
+    return;
+  }
+
+  // 首次加载
+  panel.innerHTML = '<div class="loading-text">正在分析 ' + lotteryName(key) + ' ...</div>';
+  try {
+    var r = await fetch('/api/lottery/predict/' + key);
+    var d = await r.json();
+    if (d.error) { panel.innerHTML = '<div class="error-text">' + d.error + '</div>'; return; }
+    predCache[key] = d;
+    renderPredict(key, d);
+  } catch(e) {
+    panel.innerHTML = '<div class="error-text">请求失败: ' + e.message + '</div>';
+  }
+}
+
+
+
+function lotteryName(k) {
+  return {dlt:'超级大乐透',qxc:'七星彩',pls:'排列三',plw:'排列五'}[k] || k;
+}
+
+function renderPredict(key, data) {
+  var freq = data.frequency || {};
+  var preds = data.predictions || [];
+  var total = data.history_count || 0;
+  var html = '';
+
+  // ====== 分区/分位分析 ======
+  if (key === 'dlt') {
+    // 大乐透：前区 + 后区
+    var znOrder = Object.keys(freq);
+    for (var zi = 0; zi < znOrder.length; zi++) {
+      var zn = znOrder[zi];
+      var zd = freq[zn];
+      html += '<div class="analysis-card"><h4>📊 ' + zn + ' · 基于' + total + '期</h4>';
+
+      if (zd.hot && zd.hot.length) {
+        html += '<div class="tag-row">🔥 ';
+        zd.hot.slice(0, 6).forEach(function(h) { html += '<span class="tag hot">' + h.num + '(' + h.freq + ')</span>'; });
+        html += '</div>';
+      }
+      if (zd.cold && zd.cold.length) {
+        html += '<div class="tag-row">❄ ';
+        zd.cold.slice(0, 6).forEach(function(c) { html += '<span class="tag cold">' + c.num + '(' + c.freq + ')</span>'; });
+        html += '</div>';
+      }
+      if (zd.missing && zd.missing.length) {
+        html += '<div class="tag-row">⏳ ';
+        zd.missing.slice(0, 6).forEach(function(m) { html += '<span class="tag miss">' + m.num + '(' + m.periods + '期)</span>'; });
+        html += '</div>';
+      }
+      if (zd.all_freq && zd.all_freq.length) {
+        var mx = zd.all_freq[0].freq;
+        html += '<div class="freq-chart">';
+        zd.all_freq.forEach(function(item) {
+          var pct = item.freq / mx * 100;
+          var bc = pct > 60 ? 'hot-bar' : (pct > 30 ? 'warm-bar' : 'cold-bar');
+          html += '<div class="freq-bar"><div class="bar ' + bc + '" style="height:' + Math.max(3, pct*0.4) + 'px"></div><span class="num">' + item.num + '</span><span class="val">' + item.freq + '</span></div>';
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+  } else {
+    // 数字彩：整体 + 分位
+    if (freq.overall) {
+      var ov = freq.overall;
+      html += '<div class="analysis-card"><h4>📊 整体频率 · 基于' + total + '期</h4>';
+      if (ov.hot && ov.hot.length) {
+        html += '<div class="tag-row">🔥 ';
+        ov.hot.forEach(function(h) { html += '<span class="tag hot">' + h.num + '(' + h.freq + ')</span>'; });
+        html += '</div>';
+      }
+      if (ov.cold && ov.cold.length) {
+        html += '<div class="tag-row">❄ ';
+        ov.cold.forEach(function(c) { html += '<span class="tag cold">' + c.num + '(' + c.freq + ')</span>'; });
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    if (freq.positions) {
+      freq.positions.forEach(function(pos) {
+        html += '<div class="analysis-card"><h4>📍 第' + pos.pos + '位</h4>';
+        if (pos.hot && pos.hot.length) {
+          html += '<div class="tag-row">🔥 ';
+          pos.hot.forEach(function(h) { html += '<span class="tag hot">' + h.num + '(' + h.freq + ')</span>'; });
+          html += '</div>';
+        }
+        if (pos.cold && pos.cold.length) {
+          html += '<div class="tag-row">❄ ';
+          pos.cold.forEach(function(c) { html += '<span class="tag cold">' + c.num + '(' + c.freq + ')</span>'; });
+          html += '</div>';
+        }
+        if (pos.missing && pos.missing.length) {
+          html += '<div class="tag-row">⏳ ';
+          pos.missing.forEach(function(m) { html += '<span class="tag miss">' + m.num + '(' + m.periods + ')</span>'; });
+          html += '</div>';
+        }
+        html += '</div>';
+      });
+    }
+  }
+
+  // ====== 回测得分 ======
+  var bts = data.backtests || [];
+  var best = data.best_strategy || 'weighted';
+  if (bts.length > 0 && bts[0].avg_hits > 0) {
+    var maxHits = bts[0].avg_hits || 1;
+    html += '<div class="analysis-card">';
+    html += '<h4>🏆 策略回测排名 · 最佳: <span style="color:#22c55e">' + best + '</span></h4>';
+    bts.forEach(function(bt) {
+      if (bt.error) return;
+      var pctW = Math.max(5, (bt.avg_hits || 0) / Math.max(maxHits, 0.1) * 100);
+      var isBest = bt.name === best;
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:.72rem">';
+      html += '<span style="width:70px;color:' + (isBest ? '#22c55e' : '#888') + ';font-weight:' + (isBest ? '700' : '400') + '">' + (isBest ? '★ ' : '') + bt.name + '</span>';
+      html += '<span style="color:#f59e0b;width:50px;text-align:right">均' + bt.avg_hits + '个</span>';
+      html += '<span style="color:#666;width:45px;text-align:right">' + bt.hit_rate + '%</span>';
+      html += '<div style="flex:1;height:6px;background:#1e2d45;border-radius:3px;overflow:hidden">';
+      html += '<div style="height:100%;width:' + pctW + '%;background:' + (isBest ? '#22c55e' : '#3b82f6') + ';border-radius:3px"></div>';
+      html += '</div></div>';
+    });
+    html += '<div style="font-size:.62rem;color:#555;margin-top:4px">基于最近10期回测验证，数值越高策略越准</div>';
+    html += '</div>';
+  }
+
+  // ====== 推荐号码 ======
+  html += '<div class="analysis-card">';
+  html += '<h4>🎯 智能推荐 ' + preds.length + ' 组</h4>';
+  if (preds.length) {
+    preds.forEach(function(p, i) {
+      html += '<div class="prediction-set">';
+      html += '<span class="set-label">#' + (i+1) + '</span><div class="pred-balls">';
+      p.forEach(function(n, j) {
+        html += '<span class="pball ball ' + ballCls(key, p.length, j) + '">' + n + '</span>';
+      });
+      html += '</div></div>';
+    });
+  }
+  html += '<button class="btn-refresh" onclick="doPredict(\'' + key + '\', true)">🔄 重新生成</button>';
+  html += '</div>';
+
+  document.getElementById('predictPanel').innerHTML = html;
+}
+
+// ==================== 刷新全部数据 ====================
+async function refreshAllData() {
+  var panel = document.getElementById('resultPanel');
+  panel.innerHTML = '<div class="loading-text">正在刷新数据...</div>';
+  try {
+    var r = await fetch('/api/lottery?force=1');
+    allData = await r.json();
+    // Re-render results
+    var order = ['dlt','qxc','pls','plw'];
+    var html = '';
+    for (var i = 0; i < order.length; i++) {
+      var k = order[i];
+      var lot = allData[k];
+      if (!lot || !lot.data || !lot.data.length) continue;
+      var latest = lot.data[0];
+      var nums = latest.numbers || [];
+      html += '<div class="result-card">';
+      html += '<div class="r-header">';
+      html += '<span class="r-name">' + lot.icon + ' ' + lot.name + '</span>';
+      html += '<span class="r-term">' + latest.draw_num + ' / ' + (latest.date || '') + '</span>';
+      html += '</div><div class="ball-row">';
+      for (var j = 0; j < nums.length; j++) {
+        html += '<span class="ball ' + ballCls(k, nums.length, j) + '">' + nums[j] + '</span>';
+      }
+      html += '</div><div class="r-meta">';
+      if (latest.pool_balance) html += '<span>' + latest.pool_balance + '</span>';
+      if (latest.sales) html += '<span>' + latest.sales + '</span>';
+      html += '</div></div>';
+    }
+    panel.innerHTML = html;
+    // Also clear prediction cache so it uses fresh data
+    predCache = {};
+  } catch(e) {
+    panel.innerHTML = '<div class="error-text">' + e.message + '</div>';
+  }
+}
+
+// ==================== 初始化 ====================
+loadResults();
+// 默认加载大乐透预测
+setTimeout(function() { doPredict('dlt'); }, 500);
+</script>
+</body>
+</html>

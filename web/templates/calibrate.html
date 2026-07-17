@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>🔬 算法校准 - 足球预测系统</title>
+<link rel="stylesheet" href="/static/css/style.css?v=9">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+.cal-container { max-width: 900px; margin: 0 auto; padding: 20px; }
+.cal-header { text-align: center; margin-bottom: 24px; }
+.cal-header h1 { font-size: 1.6rem; margin: 0; }
+.cal-header p { color: var(--text-muted); font-size: .85rem; margin: 4px 0 0; }
+.cal-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.cal-card h3 { font-size: .95rem; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+.cal-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.cal-controls .btn { min-width: 120px; }
+.progress-wrap { margin-top: 16px; display: none; }
+.progress-wrap.active { display: block; }
+.progress-bar-bg { height: 24px; background: var(--bg-input); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+.progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), #16a34a); border-radius: 12px; transition: width .3s; width: 0%; }
+.progress-text { font-size: .78rem; color: var(--text-dim); margin-top: 6px; text-align: center; }
+.model-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.model-table th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-size: .75rem; }
+.model-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.model-table tr:hover td { background: rgba(255,255,255,.02); }
+.model-rank { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .8rem; }
+.model-rank.gold { background: rgba(234,179,8,.2); color: #eab308; }
+.model-rank.silver { background: rgba(148,163,184,.2); color: #94a3b8; }
+.model-rank.bronze { background: rgba(251,146,60,.2); color: #fb923c; }
+.model-rank.normal { background: var(--bg-input); color: var(--text-dim); }
+.acc-bar { display: inline-block; height: 8px; border-radius: 4px; margin-right: 6px; vertical-align: middle; }
+.acc-good { background: var(--green); }
+.acc-ok { background: var(--amber); }
+.acc-bad { background: #ef4444; }
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+.empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+.chart-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.chart-row > div { flex: 1; min-width: 280px; }
+.nav-back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); text-decoration: none; font-size: .8rem; margin-bottom: 16px; }
+.nav-back:hover { color: var(--green); }
+.info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.info-card { background: var(--bg-input); border-radius: 8px; padding: 12px 16px; border: 1px solid var(--border); }
+.info-card .info-value { font-size: 1.3rem; font-weight: 700; color: var(--green); }
+.info-card .info-label { font-size: .72rem; color: var(--text-dim); margin-top: 2px; }
+.excl-list { font-size: .75rem; color: var(--text-dim); max-height: 200px; overflow-y: auto; }
+.excl-list .item { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.03); }
+.excl-list .item span { color: var(--red); }
+.excl-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .7rem; margin: 2px; }
+.excl-tag.warn { background: rgba(234,179,8,.15); color: #eab308; }
+.excl-tag.info { background: rgba(59,130,246,.15); color: #60a5fa; }
+.section-divider { margin: 20px 0 12px; font-size: .85rem; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+#reportMeta { font-size: .78rem; color: var(--text-dim); margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="cal-container">
+  <a href="/" class="nav-back">← 返回预测</a>
+
+  <div class="cal-header">
+    <h1>🔬 算法校准中心</h1>
+    <p>查看算法回测结果与融合权重</p>
+  </div>
+
+  <!-- Controls -->
+  <div class="cal-card">
+    <h3>🎯 校准控制</h3>
+    <div class="cal-controls">
+      <button class="btn btn-primary" id="runBtn" onclick="runCalibration()">▶ 运行校准 (后台)</button>
+      <button class="btn btn-outline" id="loadBtn" onclick="loadReport()">📋 加载上次报告</button>
+      <span style="font-size:.78rem;color:var(--text-dim)" id="statusText">就绪</span>
+    </div>
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+      <div class="progress-text" id="progressMsg"></div>
+    </div>
+  </div>
+
+
+  <div class="cal-card" id="dataCard" style="display:none">
+    <h3>数据全貌</h3>
+    <div class="info-grid" id="dataGrid"></div>
+    <div class="section-divider">数据来源</div>
+    <div id="dataSources" style="font-size:.78rem;color:var(--text-dim)"></div>
+    <div class="section-divider">模型排除原因</div>
+    <div class="excl-list" id="exclReasons"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="cal-card" id="resultCard" style="display:none">
+    <h3>📊 校准结果 <span id="reportMeta"></span></h3>
+    
+    <div class="chart-row">
+      <div><canvas id="accChart" height="280"></canvas></div>
+      <div><canvas id="weightChart" height="280"></canvas></div>
+    </div>
+
+    <table class="model-table" style="margin-top:16px">
+      <thead><tr><th>#</th><th>模型</th><th>准确率</th><th>Brier</th><th>Log Loss</th><th>权重</th><th>场次</th></tr></thead>
+      <tbody id="modelTbody"></tbody>
+    </table>
+  </div>
+
+  <div class="cal-card" id="emptyCard">
+    <div class="empty-state">
+      <div class="icon">🔬</div>
+      <p>点击「运行校准」在后台启动 calibrate.py</p>
+      <p style="font-size:.75rem">或「加载上次报告」查看最近结果</p>
+    </div>
+  </div>
+</div>
+
+<script>
+var accChart = null, weightChart = null;
+var pollTimer = null;
+
+async function runCalibration() {
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('runBtn').textContent = '⏳ 启动中...';
+  document.getElementById('statusText').textContent = '正在后台启动 calibrate.py...';
+  document.getElementById('progressWrap').classList.add('active');
+
+  try {
+    var r = await fetch('/api/calibrate/run');
+    var d = await r.json();
+    if (d.error) { 
+      if (d.progress !== undefined) {
+        document.getElementById('statusText').textContent = '⚠️ ' + d.error + ' (已有进程运行中)';
+        startPolling();
+        return;
+      }
+      alert(d.error); 
+      resetBtn(); 
+      return; 
+    }
+    document.getElementById('statusText').textContent = '✅ ' + d.message;
+    document.getElementById('progressFill').style.width = '10%';
+    document.getElementById('progressMsg').textContent = '后台运行中，约需 1-3 分钟...';
+    startPolling();
+  } catch(e) {
+    alert('启动失败: ' + e.message);
+    resetBtn();
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async function() {
+    try {
+      var r = await fetch('/api/calibrate/status');
+      var s = await r.json();
+      document.getElementById('progressFill').style.width = Math.max(5, s.progress || 0) + '%';
+      document.getElementById('progressMsg').textContent = s.message || '';
+      document.getElementById('statusText').textContent = '⏳ 进度 ' + (s.progress||0) + '% | 耗时 ' + (s.elapsed||0) + 's';
+      
+      if (s.done) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        document.getElementById('progressWrap').classList.remove('active');
+        if (s.progress === 100 && s.report) {
+          document.getElementById('statusText').textContent = '✅ 校准完成！' + (s.total||0) + ' 场比赛';
+          renderReport(s.report, s.weights, s.total);
+        } else if (s.progress === -1) {
+          document.getElementById('statusText').textContent = '❌ ' + (s.message || '校准失败');
+        }
+        resetBtn();
+      }
+    } catch(e) {}
+  }, 2000);
+}
+
+var accChart = null, weightChart = null;
+async function runCalibration() {
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('runBtn').textContent = '⏳ 加载中...';
+  document.getElementById('statusText').textContent = '读取报告...';
+
+  try {
+    var r = await fetch('/api/calibrate/run');
+    var d = await r.json();
+    if (d.error) { 
+      alert(d.error + ''); 
+      resetBtn(); 
+      return; 
+    }
+    document.getElementById('statusText').textContent = '✅ 报告已加载（共 ' + d.total + ' 场）';
+    renderReport(d.report, d.weights, d.total);
+    resetBtn();
+  } catch(e) {
+    alert('加载失败: ' + e.message);
+    resetBtn();
+  }
+}
+
+function resetBtn() {
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('runBtn').textContent = '▶ 运行校准 (后台)';
+  document.getElementById('statusText').textContent = '就绪';
+}
+
+// Using direct load, not polling
+
+
+async function loadReport() {
+  try {
+    var r = await fetch('/api/calibration');
+    var d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    document.getElementById('statusText').textContent = '📋 已加载历史报告';
+    renderReport(d.report, d.weights, d.total_matches, d.data_summary);
+  } catch(e) {
+    alert('加载失败: ' + e.message);
+  }
+}
+
+function renderReport(report, weights, total, dataSummary) {
+  document.getElementById('emptyCard').style.display = 'none';
+  document.getElementById('resultCard').style.display = 'block';
+  document.getElementById('reportMeta').textContent = '共 ' + total + ' 场比赛';
+
+  var MODEL_NAMES = {
+    "poisson":"泊松分布","dixon_coles":"Dixon-Coles模型","elo":"ELO等级分",
+    "massey":"Massey排名法","form":"近期状态","head_to_head":"交锋记录",
+    "market_odds":"市场赔率","knn_similar":"K近邻相似","xgboost":"XGBoost集成",
+    "neural_net":"神经网络","monte_carlo":"蒙特卡洛模拟","bayesian":"贝叶斯层次"
+  };
+
+  var sorted = Object.keys(report).sort(function(a,b) {
+    return (report[b].accuracy||0) - (report[a].accuracy||0);
+  });
+
+  // Table
+  var tbody = document.getElementById('modelTbody');
+  var html = '';
+  for (var i = 0; i < sorted.length; i++) {
+    var key = sorted[i];
+    var r = report[key];
+    var w = (weights && weights[key]) ? weights[key] * 100 : 0;
+    var acc = r.accuracy || 0;
+    var rankClass = i === 0 ? 'gold' : (i === 1 ? 'silver' : (i === 2 ? 'bronze' : 'normal'));
+    var accClass = acc >= 42 ? 'acc-good' : (acc >= 36 ? 'acc-ok' : 'acc-bad');
+    html += '<tr>';
+    html += '<td><div class="model-rank ' + rankClass + '">' + (i+1) + '</div></td>';
+    html += '<td style="font-weight:700">' + (MODEL_NAMES[key] || key) + '</td>';
+    html += '<td><span class="acc-bar ' + accClass + '" style="width:' + Math.max(4, acc*1.5) + 'px"></span>' + acc.toFixed(1) + '%</td>';
+    html += '<td>' + (r.brier||0).toFixed(4) + '</td>';
+    html += '<td>' + (r.log_loss||0).toFixed(4) + '</td>';
+    html += '<td style="font-weight:700;color:var(--green)">' + w.toFixed(1) + '%</td>';
+    html += '<td style="color:var(--text-dim)">' + (r.matches||0) + '</td>';
+    html += '</tr>';
+  }
+  tbody.innerHTML = html;
+
+  // Charts
+  var labels = sorted.map(function(k) { return MODEL_NAMES[k] || k; });
+  var accData = sorted.map(function(k) { return (report[k].accuracy||0); });
+  var wData = sorted.map(function(k) { return ((weights&&weights[k])?weights[k]*100:0); });
+
+  if (accChart) accChart.destroy();
+  if (weightChart) weightChart.destroy();
+
+  accChart = new Chart(document.getElementById('accChart'), {
+    type: 'bar', data: {
+      labels: labels,
+      datasets: [{ label: '准确率 %', data: accData, backgroundColor: accData.map(function(v) { return v>=42?'#22c55e':(v>=36?'#f59e0b':'#ef4444'); }), borderRadius: 6 }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: { legend: { display: false }, title: { display: true, text: '各模型准确率对比', font: { size: 14 } } },
+      scales: { x: { min: 25, max: 55, grid: { color: 'rgba(255,255,255,.05)' } } }
+    }
+  });
+
+  weightChart = new Chart(document.getElementById('weightChart'), {
+    type: 'doughnut', data: {
+      labels: labels,
+      datasets: [{ data: wData, backgroundColor: ['#22c55e','#16a34a','#15803d','#f59e0b','#d97706','#ef4444','#8b5cf6','#6366f1','#06b6d4','#0891b2','#ec4899','#f43f5e'], borderWidth: 0 }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'bottom', labels: { font: { size: 10 }, padding: 8 } }, title: { display: true, text: '融合权重分配', font: { size: 14 } } }
+    }
+  });
+}
+
+// Load report on page load
+loadReport();
+</script>
+</body>
+</html>

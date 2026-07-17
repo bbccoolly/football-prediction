@@ -458,27 +458,9 @@ body {
 .sidebar-match .sm-odds .ho { color: var(--green); }
 .sidebar-match .sm-odds .do { color: var(--amber); }
 .sidebar-match .sm-odds .ao { color: var(--blue); }
-/* sidebar two-column layout */
-.sidebar-columns { display: flex; gap: 12px; }
-.sidebar-col { flex: 1.5; min-width: 0; }
-.sidebar-col:last-child { flex: 1.0; }
-.sidebar-col-head {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 6px; font-size: .7rem; font-weight: 600; color: var(--text-dim);
-}
-
-/* header nav link */
-.nav-link {
-  color: var(--text-dim); text-decoration: none; padding: 6px 14px;
-  border-radius: var(--radius-sm); font-size: .82rem; font-weight: 500;
-  transition: all .2s; border: 1px solid transparent;
-}
-.nav-link:hover { color: var(--text); background: var(--bg-input); border-color: var(--border); }
-
 @media (max-width: 900px) {
   .container { flex-direction: column; }
   .sidebar { width: 100%; position: static; max-height: none; }
-  .sidebar-columns { flex-direction: column; }
 }
 
 /* =======  RESPONSIVE  ======= */
