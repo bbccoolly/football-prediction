@@ -442,9 +442,15 @@ def api_debug_predict():
     debug = {"home_team": home_team, "away_team": away_team, "neutral": neutral}
 
     # ---- 原始数据 ----
+    elo_raw_home = elo_model.get_rating(home_team)
+    elo_raw_away = elo_model.get_rating(away_team)
+    home_bonus = 0 if neutral else 100
     debug["raw_data"] = {
-        "elo_home": elo_model.get_rating(home_team),
-        "elo_away": elo_model.get_rating(away_team),
+        "elo_home": elo_raw_home,
+        "elo_away": elo_raw_away,
+        "elo_home_effective": elo_raw_home + home_bonus,  # 含主场加成
+        "elo_away_effective": elo_raw_away,
+        "home_bonus": home_bonus,
         "attack_home": poisson_model.attack_strengths.get(home_team, 1.0),
         "defense_home": poisson_model.defense_strengths.get(home_team, 1.0),
         "attack_away": poisson_model.attack_strengths.get(away_team, 1.0),
@@ -480,14 +486,23 @@ def api_debug_predict():
     # ELO
     eh = debug["raw_data"]["elo_home"]
     ea = debug["raw_data"]["elo_away"]
-    elo_diff = eh - ea + (0 if neutral else 100)
+    raw_diff = eh - ea  # 原始分差（不含主场加成）
+    elo_diff = raw_diff + home_bonus  # 有效分差（含主场加成）
     exp_home = 1.0 / (1.0 + 10**(-elo_diff/400))
+    if home_bonus > 0 and raw_diff == 0:
+        interp = f"两队ELO相同({eh:.0f})，主场加成 +{home_bonus} 分 → 有效分差 {elo_diff:.0f}，主队预期胜率 {exp_home:.1%}"
+    elif home_bonus > 0:
+        interp = f"原始分差 {raw_diff:.0f} + 主场加成 +{home_bonus} → 有效分差 {elo_diff:.0f}，主队预期胜率 {exp_home:.1%}"
+    else:
+        interp = f"中立场地无主场加成，ELO 差 {elo_diff:.0f} 分，主队预期胜率 {exp_home:.1%}"
     steps["elo"] = {
         "formula": "P(home) = 1 / (1 + 10^(-diff/400))",
-        "elo_home": eh, "elo_away": ea, "home_bonus": 0 if neutral else 100,
-        "elo_diff": elo_diff,
+        "elo_home": eh, "elo_away": ea,
+        "elo_home_effective": eh + home_bonus, "elo_away_effective": ea,
+        "home_bonus": home_bonus,
+        "raw_diff": raw_diff, "elo_diff": elo_diff,
         "expected_win": round(exp_home, 3),
-        "interpretation": f"ELO 差 {elo_diff:.0f} 分, 主队预期胜率 {exp_home:.1%}",
+        "interpretation": interp,
     }
 
     # Massey

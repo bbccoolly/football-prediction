@@ -356,6 +356,9 @@ async function runPrediction() {
     btn.disabled = true;
     btn.textContent = "计算中...";
     document.getElementById("results").style.display = "none";
+    // 新预测开始 → 关闭旧的调试面板，避免显示上一次的计算过程
+    var debugPanel = document.getElementById("debugPanel");
+    if (debugPanel) debugPanel.style.display = "none";
     updateProgress(0, 12, "启动中...");
 
     var evtSource = new EventSource("/api/progress/" + taskId);
@@ -718,9 +721,9 @@ async function showDebug() {
     var panel = document.getElementById("debugPanel");
     var content = document.getElementById("debugContent");
 
+    // 如果面板已打开，先关闭再重新加载（确保显示的是当前球队的计算过程）
     if (panel.style.display === "block") {
         panel.style.display = "none";
-        return;
     }
 
     content.innerHTML = "<div class='loading-text'>加载计算过程...</div>";
@@ -755,7 +758,15 @@ function renderDebug(d) {
     h += "<div class='debug-section'>";
     h += "<h3>参考数据</h3>";
     h += "<table class='debug-table'>";
-    h += "<tr><td>ELO 评分</td><td class='v'>" + (raw.elo_home||"-") + " vs " + (raw.elo_away||"-") + "</td></tr>";
+    h += "<tr><td>ELO 评分（原始）</td><td class='v'>" + (raw.elo_home||"-") + " vs " + (raw.elo_away||"-") + "</td></tr>";
+    // 主场加成显示
+    var homeBonus = raw.home_bonus || 0;
+    if (homeBonus > 0) {
+        var eloHomeEff = raw.elo_home_effective || raw.elo_home;
+        var eloAwayEff = raw.elo_away_effective || raw.elo_away;
+        h += "<tr><td>ELO 评分（有效）</td><td class='v'>" + eloHomeEff + " vs " + eloAwayEff
+          + " <span style='color:var(--accent);font-size:.7rem'>含主场加成 +" + homeBonus + "</span></td></tr>";
+    }
     h += "<tr><td>Massey 评分</td><td class='v'>" + (raw.massey_home||0).toFixed(2) + " vs " + (raw.massey_away||0).toFixed(2) + "</td></tr>";
     h += "<tr><td>攻击力</td><td class='v'>" + (raw.attack_home||1).toFixed(2) + " vs " + (raw.attack_away||1).toFixed(2) + "</td></tr>";
     h += "<tr><td>防守力</td><td class='v'>" + (raw.defense_home||1).toFixed(2) + " vs " + (raw.defense_away||1).toFixed(2) + "</td></tr>";
@@ -806,7 +817,16 @@ function renderDebug(d) {
         if (s.formula) h += "<div class='debug-row'><span class='lbl'>公式</span><code>" + s.formula + "</code></div>";
         if (s.lambda_home !== undefined) h += "<div class='debug-row'><span class='lbl'>λ 主队</span><span class='v'>" + s.lambda_home + "</span></div>";
         if (s.lambda_away !== undefined) h += "<div class='debug-row'><span class='lbl'>λ 客队</span><span class='v'>" + s.lambda_away + "</span></div>";
-        if (s.elo_diff !== undefined) h += "<div class='debug-row'><span class='lbl'>ELO差</span><span class='v'>" + s.elo_diff.toFixed(0) + "</span></div>";
+        if (s.elo_diff !== undefined) {
+            // ELO 详细信息：区分原始分差和主场加成
+            if (s.home_bonus > 0) {
+                h += "<div class='debug-row'><span class='lbl'>原始ELO</span><span class='v'>" + s.elo_home + " vs " + s.elo_away + "（差 " + (s.raw_diff||0) + "）</span></div>";
+                h += "<div class='debug-row'><span class='lbl'>主场加成</span><span class='v' style='color:var(--accent)'>+" + s.home_bonus + " 分（非中立场地）</span></div>";
+                h += "<div class='debug-row'><span class='lbl'>有效ELO</span><span class='v'>" + s.elo_home_effective + " vs " + s.elo_away_effective + "（有效差 " + s.elo_diff.toFixed(0) + "）</span></div>";
+            } else {
+                h += "<div class='debug-row'><span class='lbl'>ELO差</span><span class='v'>" + s.elo_diff.toFixed(0) + "（中立场地，无主场加成）</span></div>";
+            }
+        }
         if (s.expected_win !== undefined) h += "<div class='debug-row'><span class='lbl'>预期胜率</span><span class='v'>" + (s.expected_win*100).toFixed(1) + "%</span></div>";
         if (s.form_diff !== undefined) h += "<div class='debug-row'><span class='lbl'>状态差</span><span class='v'>" + s.form_diff.toFixed(3) + "</span></div>";
         if (s.record) h += "<div class='debug-row'><span class='lbl'>交锋记录</span><span class='v'>" + s.record + "</span></div>";
