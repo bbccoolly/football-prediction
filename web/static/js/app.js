@@ -731,13 +731,23 @@ async function showDebug() {
     panel.scrollIntoView({ behavior: "smooth" });
 
     try {
+        // 同时传递赔率（从输入框读取，侧边栏点击的比赛已有赔率）
+        var ho = document.getElementById("homeOdds").value;
+        var dd = document.getElementById("drawOdds").value;
+        var ao = document.getElementById("awayOdds").value;
+        var body = {
+            home_team: selectedHome, away_team: selectedAway,
+            neutral: document.getElementById("neutral").value === "true",
+        };
+        if (ho && dd && ao) {
+            body.home_odds = parseFloat(ho);
+            body.draw_odds = parseFloat(dd);
+            body.away_odds = parseFloat(ao);
+        }
         var r = await fetch("/api/debug_predict", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                home_team: selectedHome, away_team: selectedAway,
-                neutral: document.getElementById("neutral").value === "true",
-            }),
+            body: JSON.stringify(body),
         });
         var d = await r.json();
         renderDebug(d);

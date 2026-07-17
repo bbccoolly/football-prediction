@@ -435,6 +435,9 @@ def api_debug_predict():
     home_team = data.get("home_team", "").strip()
     away_team = data.get("away_team", "").strip()
     neutral = data.get("neutral", False)
+    home_odds = data.get("home_odds")
+    draw_odds = data.get("draw_odds")
+    away_odds = data.get("away_odds")
 
     if not home_team or not away_team:
         return jsonify({"error": "need teams"}), 400
@@ -532,9 +535,21 @@ def api_debug_predict():
     }
 
     # Market odds (prior)
-    steps["market_odds"] = {
-        "note": "未输入赔率时使用先验 45/28/27",
-    }
+    if home_odds and draw_odds and away_odds:
+        try:
+            ho = float(home_odds); do = float(draw_odds); ao = float(away_odds)
+            total = 1/ho + 1/do + 1/ao
+            steps["market_odds"] = {
+                "formula": "P = (1/odds) / (1/H + 1/D + 1/A), 即去水头归一化",
+                "odds_input": f"主{ho} / 平{do} / 客{ao}",
+                "raw_probs": f"主{1/ho:.4f} / 平{1/do:.4f} / 客{1/ao:.4f}",
+                "water_rate": f"{total:.4f}（水头 {(total-1)*100:.1f}%）",
+                "interpretation": f"赔率反推：市场认为主胜概率约 {1/ho/total*100:.1f}%",
+            }
+        except:
+            steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
+    else:
+        steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
 
     # Monte Carlo
     steps["monte_carlo"] = {
@@ -559,7 +574,13 @@ def api_debug_predict():
     predictions["massey"] = massey_model.predict(home_team, away_team, neutral)
     predictions["form"] = form_model.predict(home_team, away_team, neutral)
     predictions["head_to_head"] = h2h_model.predict(home_team, away_team, neutral)
-    predictions["market_odds"] = market_model.predict()
+    if home_odds and draw_odds and away_odds:
+        try:
+            predictions["market_odds"] = market_model.predict(home_odds=float(home_odds), draw_odds=float(draw_odds), away_odds=float(away_odds))
+        except:
+            predictions["market_odds"] = market_model.predict()
+    else:
+        predictions["market_odds"] = market_model.predict()
     predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral)
 
         # 让球胜负预测
