@@ -1,14 +1,28 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.pyo
 *.log
 server_err*.log
 server_out*.log
-data/processed/
-data/raw/
-ensemble/weights.json
-ensemble/saved_models/
 *.db
 .env
 .DS_Store
 Thumbs.db
+
+# 运行时生成
+data/processed/
+data/raw/
+data/lottery_cache/
+ensemble/weights.json
+ensemble/saved_models/
+
+# Claude/Agent 项目配置（仅本地）
+CLAUDE.md
+AGENTS.md
+
+# 备份文件
+.restore_backup_*/
+*_backup*.py
+
+# 冗余静态资源（HTML 使用 CDN）
+web/static/js/chart.umd.min.js
