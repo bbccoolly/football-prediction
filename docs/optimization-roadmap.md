@@ -417,6 +417,8 @@ docs: 补充模型准入与回测规范
 
 ### 迭代 A：正确性基座
 
+详细实施步骤见 [迭代 A：预测正确性基座实施方案](iteration-a-implementation-plan.md)。
+
 - 引入 pytest 和固定样本。
 - 增加 ELO、权重迁移、模型可用性和概率约束测试。
 - 重建 ELO。
