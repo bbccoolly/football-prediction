@@ -1,6 +1,6 @@
 # ⚽ 足球比赛预测系统
 
-基于 **12 种算法** 的足球比赛预测系统，融合泊松分布、ELO 评级、蒙特卡洛模拟、贝叶斯层次模型等，覆盖胜平负、让球胜负、比分、进球数、半全场等全面预测。
+基于 **12 个候选模型** 的足球比赛预测系统，融合泊松分布、ELO 评级、蒙特卡洛模拟、贝叶斯层次模型等，覆盖胜平负、让球胜负、比分、进球数、半全场等预测。未训练或输出非法的模型不会参与最终融合。
 
 ## 功能特性
 
@@ -50,7 +50,7 @@ python run.py
 
 浏览器打开 **http://127.0.0.1:5000**
 
-> 首次启动会自动抓取 OpenLigaDB 和 500.com 的历史比赛数据（约 2000 场），需要 1-2 分钟。
+> 首次启动会尝试抓取 OpenLigaDB 单赛季德甲和 500.com 近期完场数据，通常为 300 场以上；数量和耗时取决于网络与源站可用性。
 
 ### 命令行模式
 
@@ -94,7 +94,8 @@ football-prediction/
 │   └── bayesian_hierarchical.py  #   贝叶斯层次模型
 │
 ├── ensemble/                     # 融合层
-│   ├── bma.py                    #   BMA 贝叶斯模型平均
+│   ├── bma.py                    #   基于 Brier Score 的启发式动态融合
+│   ├── prediction_contract.py    #   模型可用性与概率协议
 │   └── stacker.py                #   Stacking 元学习器
 │
 ├── features/                     # 特征工程
@@ -120,6 +121,10 @@ football-prediction/
 ├── main.py                       # CLI 主入口
 ├── run.py                        # Web 启动入口
 ├── requirements.txt              # Python 依赖
+├── requirements-dev.txt          # 测试依赖
+├── scripts/                       # 只读诊断工具
+├── tests/                         # 单元、集成与固定样本
+├── docs/                          # 优化路线图与实施说明
 └── .gitignore
 ```
 

@@ -111,7 +111,7 @@
 新增 `ensemble/prediction_contract.py`，提供：
 
 - `normalize_prediction(model_id, raw_result)`
-- `validate_probabilities(result)`
+- `available_predictions(predictions)`
 - `NoAvailableModelsError`
 
 规范字段：
@@ -209,6 +209,8 @@
 - 请求体不是 JSON：400 `INVALID_JSON`
 - 球队缺失：400 `MISSING_TEAMS`
 - 球队相同：400 `SAME_TEAM`
+- `neutral` 不是布尔值：400 `INVALID_NEUTRAL`
+- 缺阵球员不是数组：400 `INVALID_MISSING_PLAYERS`
 - 赔率只填写部分、非有限值或小于等于 1：400 `INVALID_ODDS`
 - 所有模型不可用：503 `NO_AVAILABLE_MODELS`
 - 未预期内部错误：500 `INTERNAL_ERROR`
@@ -247,7 +249,6 @@
 - v1、损坏 JSON、参数变化和指纹变化都会触发安全重建。
 - 空历史不会覆盖现有产物。
 - 两个线程同时初始化只执行一次重建。
-- FIFA 同步构建失败时旧模型继续可用。
 - `knn` 正确迁移为 `knn_similar`。
 - 损坏权重文件回退初始权重但不被覆盖。
 - 未训练神经网络、空 KNN 和维度不兼容 XGBoost 权重为 0。
@@ -257,6 +258,8 @@
 - 普通预测和调试预测的模型结果一致。
 - 测试期间所有网络请求被阻止。
 - 测试不修改真实数据与模型文件。
+
+FIFA 外部同步失败与模型原子替换仍缺少自动化测试，后续应通过保存的 API 响应样本补齐，避免测试依赖 FIFA 网络服务。
 
 执行命令：
 
@@ -293,10 +296,11 @@ docs: 更新预测接口与模型状态说明
 
 ## 6. 实施结果
 
-- 已建立离线 pytest 测试体系，默认阻断网络访问。
+- 已建立离线 pytest 测试体系，共 27 项测试，默认阻断网络访问。
 - ELO 持久化已升级至 schema v2，相同数据重复启动不再改写评分文件。
 - 普通预测和调试预测已共用模型编排入口。
 - 旧 `knn` 权重会迁移为 `knn_similar`，不可用模型的实际权重为 0。
 - 神经网络无训练产物时明确显示不可用，不再以固定概率参与融合。
 - 页面和 CLI 已改用“模型一致度”，并显示实际有效模型。
 - `confidence` 和 `ensemble.weights` 仍作为兼容字段保留。
+- 阿根廷对法国的浏览器预测流程已验收，页面显示 10/12 个有效模型且无控制台错误。
