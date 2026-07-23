@@ -6,8 +6,8 @@
 
 | 功能 | 说明 |
 |------|------|
-| 🎯 12 算法融合 | 泊松 / Dixon-Coles / ELO / Massey / 近期状态 / 交锋记录 / 市场赔率 / KNN / XGBoost / 神经网络 / 蒙特卡洛 / 贝叶斯层次 |
-| 📊 BMA 融合 | 贝叶斯模型平均，基于 Brier Score 自动校准动态权重 |
+| 🎯 12 个候选模型 | 泊松 / Dixon-Coles / ELO / Massey / 近期状态 / 交锋记录 / 市场赔率 / KNN / XGBoost / 神经网络 / 蒙特卡洛 / 贝叶斯层次；未训练或输出非法的模型自动退出融合 |
+| 📊 动态融合 | 基于 Brier Score 的启发式动态权重，并按本次有效模型重新归一化 |
 | 🎰 让球胜负 | ±1 / ±1.5 / ±2 共 7 个盘口的概率计算 |
 | 📈 半全场 | 半场/全场组合概率分布 |
 | 🏟️ 场地因素 | 自动识别世界杯等中立场地，主场优势分联赛配置 |
@@ -33,6 +33,13 @@ cd football-prediction
 
 # 安装依赖
 pip install -r requirements.txt
+```
+
+开发与测试依赖：
+
+```bash
+python -m pip install -r requirements-dev.txt
+pytest -q
 ```
 
 ### 启动
@@ -152,7 +159,7 @@ python calibrate_cli.py --quick
 | 路由 | 方法 | 说明 |
 |------|------|------|
 | `/` | GET | 预测主页 |
-| `/predict` | POST | 运行 12 模型预测 |
+| `/predict` | POST | 运行候选模型并融合当前有效结果 |
 | `/api/debug_predict` | POST | 查看完整计算过程 |
 | `/api/search_matches` | GET | 搜索比赛/交锋/近期 |
 | `/api/upcoming` | GET | 待开赛比赛列表 |
@@ -176,6 +183,8 @@ python calibrate_cli.py --quick
 | `/betting` | GET | 竞彩投注页面 |
 | `/calibrate` | GET | 校准页面 |
 | `/lottery` | GET | 彩票页面 |
+
+`/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（模型可用数量）以及配置权重和本次实际权重。旧字段 `confidence` 和 `ensemble.weights` 暂时保留兼容，分别对应 `model_agreement` 和 `ensemble.effective_weights`。
 
 ## 技术栈
 
