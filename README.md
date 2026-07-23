@@ -59,7 +59,23 @@ python run.py
 
 默认只监听 `127.0.0.1:5000`。可通过 `FOOTBALL_HOST` 和 `FOOTBALL_PORT` 修改；监听非回环地址时必须配置管理令牌。
 
-> 首次启动会尝试抓取 OpenLigaDB 单赛季德甲和 500.com 近期完场数据，通常为 300 场以上；数量和耗时取决于网络与源站可用性。
+历史比赛读取不会隐式联网或创建数据库：存在 SQLite 标准库时优先读取，否则只读回退旧 JSON。待开赛列表仍会按现有缓存策略访问 500.com 或竞彩网；数据同步必须通过受管理令牌保护的显式接口执行。
+
+### 历史数据迁移
+
+首次启用标准比赛库前先执行 dry-run，命令只输出导入、重复、拒绝和未匹配统计，不创建数据库：
+
+```bash
+python scripts/migrate_history.py --source data/processed/match_history.json
+```
+
+确认报告后显式写入 SQLite：
+
+```bash
+python scripts/migrate_history.py --source data/processed/match_history.json --apply
+```
+
+默认数据库为 `data/processed/football.db`，可使用 `FOOTBALL_DB_PATH` 或 `--database PATH` 覆盖。运行时数据库和旧历史数据均被 Git 忽略，不应提交。
 
 ### 命令行模式
 
@@ -113,7 +129,11 @@ football-prediction/
 │
 ├── data/                         # 数据层
 │   ├── fetcher.py                #   500.com / 竞彩网实时抓取
-│   ├── history_db.py             #   历史比赛数据库
+│   ├── match_repository.py       #   SQLite 标准比赛仓库
+│   ├── source_adapters.py        #   OpenLigaDB / 500.com / FIFA 来源适配
+│   ├── fifa_sync.py              #   FIFA 显式同步
+│   ├── history_db.py             #   SQLite 优先、旧 JSON 只读兼容
+│   ├── reference/                #   受版本控制的球队别名种子
 │   └── venue_db.py               #   场地数据库
 │
 ├── betting/                      # 竞彩投注
@@ -131,7 +151,8 @@ football-prediction/
 ├── run.py                        # Web 启动入口
 ├── requirements.txt              # Python 依赖
 ├── requirements-dev.txt          # 测试依赖
-├── scripts/                       # 只读诊断工具
+├── scripts/                       # 诊断与显式迁移工具
+│   └── migrate_history.py         #   历史 JSON dry-run / 正式迁移
 ├── tests/                         # 单元、集成与固定样本
 ├── docs/                          # 优化路线图与实施说明
 └── .gitignore

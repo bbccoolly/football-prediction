@@ -4,6 +4,8 @@ import time
 import pytest
 
 import web.app as web_app
+from data.match_repository import MatchRepository
+from data.source_adapters import adapt_fifa_match
 from ensemble.prediction_contract import NoAvailableModelsError
 
 
@@ -189,3 +191,48 @@ def test_refresh_accepts_valid_admin_token(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "ok"
+
+
+def test_fifa_sync_requires_initialized_match_repository(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    monkeypatch.setenv("FOOTBALL_DB_PATH", str(tmp_path / "missing" / "football.db"))
+
+    response = client.post(
+        "/api/sync_fifa",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error_code"] == "MATCH_REPOSITORY_NOT_INITIALIZED"
+
+
+def test_fifa_sync_imports_through_repository(client, monkeypatch, tmp_path):
+    database = tmp_path / "football.db"
+    MatchRepository(database).initialize()
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    monkeypatch.setenv("FOOTBALL_DB_PATH", str(database))
+    monkeypatch.setattr(web_app, "_refresh_models_after_history_change", lambda: None)
+    record = adapt_fifa_match({
+        "IdMatch": "fifa-api-1",
+        "Date": "2026-07-20T18:00:00Z",
+        "CompetitionName": [{"Description": "FIFA World Cup"}],
+        "Home": {"TeamName": [{"Description": "France"}]},
+        "Away": {"TeamName": [{"Description": "Spain"}]},
+        "HomeTeamScore": 1,
+        "AwayTeamScore": 0,
+    })
+    monkeypatch.setattr(
+        "data.fifa_sync.fetch_recent_fifa_source_records",
+        lambda days=14: {"records": [record], "fetched": 1, "errors": []},
+    )
+
+    response = client.post(
+        "/api/sync_fifa",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["inserted"] == 1
+    assert body["total_history"] == 1
+    assert MatchRepository(database).list_matches()[0]["home_team"] == "法国"

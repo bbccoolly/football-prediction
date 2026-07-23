@@ -1020,104 +1020,66 @@ def api_wc_matches():
     wc.sort(key=bj_key, reverse=True)
     return jsonify({"count": len(wc), "matches": wc})
 
+
+def _refresh_models_after_history_change():
+    """Compatibility refresh until PR 3 replaces globals with an atomic snapshot."""
+    global elo_model, poisson_model
+    from data.history_db import load_history
+    from models.elo import EloRating
+    from models.poisson import PoissonModel, build_strengths_from_results
+
+    history = load_history()
+    refreshed_elo = EloRating()
+    refreshed_elo.rebuild(history)
+    refreshed_elo.save()
+    refreshed_poisson = PoissonModel()
+    refreshed_poisson.set_team_strengths(build_strengths_from_results(history))
+    with _model_init_lock:
+        elo_model = refreshed_elo
+        poisson_model = refreshed_poisson
+
 @app.route("/api/sync_fifa", methods=["POST"])
 @_admin_required
 def api_sync_fifa():
     """同步FIFA世界杯比赛数据"""
-    global elo_model, poisson_model
-    from data.history_db import load_history, add_match
-    from models.elo import EloRating
-    from models.poisson import build_strengths_from_results
-    import requests as req, unicodedata
-    from datetime import datetime, timedelta, timezone
+    from data.fifa_sync import fetch_recent_fifa_source_records
+    from data.history_db import load_history
+    from data.match_repository import (
+        RepositoryNotInitializedError,
+        get_default_repository,
+    )
 
     try:
-        H = {"User-Agent": "Mozilla/5.0"}
-        EN_CN = {
-            "Argentina":"阿根廷","Brazil":"巴西","Germany":"德国","France":"法国","Spain":"西班牙",
-            "England":"英格兰","Italy":"意大利","Netherlands":"荷兰","Portugal":"葡萄牙","Belgium":"比利时",
-            "Croatia":"克罗地亚","Uruguay":"乌拉圭","Colombia":"哥伦比亚","Mexico":"墨西哥",
-            "Japan":"日本","Korea Republic":"韩国","Iran":"伊朗","IR Iran":"伊朗",
-            "Saudi Arabia":"沙特阿拉伯","Australia":"澳大利亚","Senegal":"塞内加尔",
-            "Morocco":"摩洛哥","Tunisia":"突尼斯","Ghana":"加纳","Cameroon":"喀麦隆",
-            "Nigeria":"尼日利亚","Egypt":"埃及","Algeria":"阿尔及利亚",
-            "Costa Rica":"哥斯达黎加","USA":"美国","Canada":"加拿大","Panama":"巴拿马",
-            "Ecuador":"厄瓜多尔","Peru":"秘鲁","Chile":"智利","Paraguay":"巴拉圭",
-            "Switzerland":"瑞士","Austria":"奥地利","Serbia":"塞尔维亚","Denmark":"丹麦",
-            "Sweden":"瑞典","Norway":"挪威","Poland":"波兰","Czechia":"捷克",
-            "Ukraine":"乌克兰","Turkey":"土耳其","Greece":"希腊","Scotland":"苏格兰",
-            "Wales":"威尔士","Hungary":"匈牙利","Slovakia":"斯洛伐克","Romania":"罗马尼亚",
-            "Finland":"芬兰","Iceland":"冰岛","Slovenia":"斯洛文尼亚",
-            "Bosnia and Herzegovina":"波黑","Georgia":"格鲁吉亚","Israel":"以色列",
-            "Venezuela":"委内瑞拉","Haiti":"海地","South Africa":"南非",
-            "Qatar":"卡塔尔","Iraq":"伊拉克","United Arab Emirates":"阿联酋",
-            "New Zealand":"新西兰","Burkina Faso":"布基纳法索","Mali":"马里",
-            "Cote d'Ivoire":"科特迪瓦","Côte d'Ivoire":"科特迪瓦",
-            "Türkiye":"土耳其","Curaçao":"库拉索","Curacao":"库拉索",
-            "Cabo Verde":"佛得角","Congo DR":"刚果民主共和国","Jordan":"约旦",
-        }
-        def tr(n):
-            if not n: return "?"
-            if n in EN_CN: return EN_CN[n]
-            n_norm = unicodedata.normalize('NFKD', n).encode('ascii','ignore').decode()
-            for e, c in EN_CN.items():
-                e_norm = unicodedata.normalize('NFKD', e).encode('ascii','ignore').decode()
-                if e_norm.lower() == n_norm.lower(): return c
-                if e_norm.lower() in n_norm.lower() or n_norm.lower() in e_norm.lower(): return c
-            return n
+        repository = get_default_repository()
+        sync_run_id = repository.create_sync_run("fifa_recent", {"days": 14})
+        fetched = fetch_recent_fifa_source_records(days=14)
+        counts = repository.import_source_records(
+            fetched["records"],
+            sync_run_id,
+            sync_type="fifa_recent",
+        )
 
-        history = load_history()
-        db_keys = set((m.get("home_team",""), m.get("away_team",""), m.get("date","")) for m in history)
-        added = 0
-        fetched = 0
-        
-        today = datetime.now(timezone.utc)
-        # Query in 3-day chunks to avoid API pagination limits
-        for days_back in range(14, -1, -3):
-            sd = (today - timedelta(days=min(days_back+2, 14))).strftime("%Y-%m-%dT00:00:00Z")
-            ed = (today - timedelta(days=max(days_back-1, 0))).strftime("%Y-%m-%dT23:59:59Z")
-            try:
-                r = req.get("https://api.fifa.com/api/v3/calendar/matches",
-                    params={"language":"en","count":200,"from":sd,"to":ed}, headers=H, timeout=15)
-                results = r.json().get("Results",[])
-                for m in results:
-                    comp = (m.get("CompetitionName",[{}]) or [{}])[0].get("Description","")
-                    if "World Cup" not in comp or "Women" in comp: continue
-                    fetched += 1
-                    
-                    home = m.get("Home",{})
-                    away = m.get("Away",{})
-                    hn = tr((home.get("TeamName",[{}]) or [{}])[0].get("Description") or home.get("ShortClubName") or "")
-                    an = tr((away.get("TeamName",[{}]) or [{}])[0].get("Description") or away.get("ShortClubName") or "")
-                    hs = m.get("HomeTeamScore")
-                    aws = m.get("AwayTeamScore")
-                    if hs is None or aws is None: continue
-                    if hn == "?" or an == "?" or hn == an: continue
-                    
-                    key = (hn, an, (m.get("Date") or "")[:10])
-                    if key not in db_keys:
-                        match = {"home_team":hn,"away_team":an,"home_goals":int(hs),"away_goals":int(aws),"league":"世界杯","date":key[2]}
-                        add_match(match)
-                        db_keys.add(key)
-                        added += 1
-            except Exception as exc:
-                print(f"[FIFA] 同步区间 {sd} - {ed} 失败: {exc}")
+        changed = counts["inserted"] + counts["updated"]
+        if changed > 0:
+            _refresh_models_after_history_change()
 
-        if added > 0:
-            h2 = load_history()
-            refreshed_elo = EloRating()
-            refreshed_elo.rebuild(h2)
-            refreshed_elo.save()
-            strengths = build_strengths_from_results(h2)
-            refreshed_poisson = PoissonModel()
-            refreshed_poisson.set_team_strengths(strengths)
-            with _model_init_lock:
-                elo_model = refreshed_elo
-                poisson_model = refreshed_poisson
-
-        return jsonify({"status":"ok","fetched":fetched,"added":added,"total_history":len(load_history())})
+        return jsonify({
+            "status": "ok" if not fetched["errors"] else "partial",
+            "sync_run_id": sync_run_id,
+            **counts,
+            "fetched": fetched["fetched"],
+            "errors": fetched["errors"],
+            "total_history": len(load_history()),
+        })
+    except RepositoryNotInitializedError:
+        return _api_error(
+            "比赛数据库尚未初始化，请先执行历史数据迁移",
+            "MATCH_REPOSITORY_NOT_INITIALIZED",
+            503,
+        )
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        print(f"[FIFA] 同步失败: {e}")
+        return _api_error("FIFA 数据同步失败", "FIFA_SYNC_FAILED", 500)
 
 # Pre-import calibrate to avoid thread issues
 try:
