@@ -425,7 +425,13 @@ function renderResults(data) {
     document.querySelector("#probDraw .val").textContent = (ens.draw * 100).toFixed(1) + "%";
     document.querySelector("#probAway .val").textContent = (ens.away_win * 100).toFixed(1) + "%";
     document.querySelector("#showGoals").textContent = ens.expected_total_goals.toFixed(1);
-    document.querySelector("#showConf").textContent = data.confidence.toFixed(0) + "%";
+    var agreement = data.model_agreement;
+    if (agreement === undefined || agreement === null) agreement = data.confidence || 0;
+    document.querySelector("#showConf").textContent = agreement.toFixed(0) + "%";
+    var summary = data.model_summary || {};
+    document.querySelector("#showModelCount").textContent =
+        (summary.available_models !== undefined ? summary.available_models : "-")
+        + " / " + (summary.total_models !== undefined ? summary.total_models : "-");
 
     highlightMax(".prob-block", [ens.home_win, ens.draw, ens.away_win]);
     renderPieChart(ens.home_win, ens.draw, ens.away_win);
@@ -440,7 +446,7 @@ function renderResults(data) {
     }
     document.getElementById("topScores").innerHTML = scoresHtml;
 
-    renderModelsTable(data.predictions, ens.weights || {});
+    renderModelsTable(data.predictions, ens.effective_weights || ens.weights || {});
 
     var gd = (data.predictions.monte_carlo && data.predictions.monte_carlo.total_goals_dist)
           || (data.predictions.poisson && data.predictions.poisson.total_goals_dist)
@@ -570,13 +576,18 @@ function renderModelsTable(preds, weights) {
         if (!preds.hasOwnProperty(key)) continue;
         var pred = preds[key];
         var w = weights[key] || 0;
+        var unavailable = pred.available === false;
         var goals = pred.expected_total_goals ? pred.expected_total_goals.toFixed(1) : "-";
-        var cls = pred.status ? "dimmed" : "";
+        var cls = unavailable ? "dimmed" : "";
+        var reason = (pred.warnings || []).join(", ") || pred.status || "不可用";
+        var home = unavailable ? "不可用" : (pred.home_win * 100).toFixed(1) + "%";
+        var draw = unavailable ? "-" : (pred.draw * 100).toFixed(1) + "%";
+        var away = unavailable ? "-" : (pred.away_win * 100).toFixed(1) + "%";
         html += "<tr class='" + cls + "'>"
              + "<td class='model-name' data-model='" + key + "' onclick='showModelInfo(event, \"" + key + "\")' title='点击查看模型介绍'>" + (MODEL_NAMES[key] || key) + "</td>"
-             + "<td class='prob-cell h'>" + (pred.home_win * 100).toFixed(1) + "%</td>"
-             + "<td class='prob-cell d'>" + (pred.draw * 100).toFixed(1) + "%</td>"
-             + "<td class='prob-cell a'>" + (pred.away_win * 100).toFixed(1) + "%</td>"
+             + "<td class='prob-cell h' title='" + reason + "'>" + home + "</td>"
+             + "<td class='prob-cell d'>" + draw + "</td>"
+             + "<td class='prob-cell a'>" + away + "</td>"
              + "<td>" + goals + "</td>"
              + "<td>" + (w * 100).toFixed(1) + "%</td>"
              + "</tr>";

@@ -19,6 +19,7 @@ from features.player_impact import PlayerImpact
 from features.builder import FeatureBuilder
 from ensemble.bma import BayesianModelAveraging
 from ensemble.stacker import StackingEnsemble
+from ensemble.prediction_contract import normalize_prediction
 from config import HOME_ADVANTAGE
 
 
@@ -31,11 +32,11 @@ def print_banner():
     print()
 
 
-def print_prediction(predictions, ensemble, confidence):
+def print_prediction(predictions, ensemble, model_agreement):
     ens = ensemble
     print()
     print("-" * 50)
-    print(f"  Ensemble  (confidence: {confidence:.0f}%)")
+    print(f"  Ensemble  (model agreement: {model_agreement:.0f}%)")
     print("-" * 50)
     print(f"  Home: {ens['home_win']*100:5.1f}%  |  Draw: {ens['draw']*100:5.1f}%  |  Away: {ens['away_win']*100:5.1f}%")
     print(f"  Expected goals: {ens['expected_total_goals']:.1f}")
@@ -58,6 +59,9 @@ def print_prediction(predictions, ensemble, confidence):
     weights = ens.get("weights", {})
     for key, pred in predictions.items():
         w = weights.get(key, 0)
+        if not pred.get("available", True):
+            print(f"  {model_names.get(key, key):<16} {'unavailable':>39} {w*100:7.1f}%")
+            continue
         goals = pred.get("expected_total_goals", 0)
         print(f"  {model_names.get(key, key):<16} {pred['home_win']*100:7.1f}% {pred['draw']*100:7.1f}% {pred['away_win']*100:7.1f}% {goals:5.1f} {w*100:7.1f}%")
     print()
@@ -75,7 +79,7 @@ def run_interactive():
         if h == a: continue
         sample_matches.append({"home_team":h,"away_team":a,"home_goals":rng.choices([0,1,2,3,4],weights=[8,20,25,15,7])[0],"away_goals":rng.choices([0,1,2,3,4],weights=[10,22,23,12,5])[0]})
 
-    elo = EloRating(); elo.load()
+    elo = EloRating(); elo.rebuild(sample_matches)
     strengths = build_strengths_from_results(sample_matches)
     poisson = PoissonModel(); poisson.set_team_strengths(strengths)
     dc = DixonColesModel(); dc.set_team_strengths(strengths)
@@ -90,7 +94,7 @@ def run_interactive():
     xgb = XGBoostModel(); nn = NeuralNetModel()
     mc = MonteCarloModel()
     bayes = BayesianHierarchicalModel(); bayes.fit(sample_matches)
-    bma = BayesianModelAveraging()
+    bma = BayesianModelAveraging(); bma.load()
 
     print("[Init] Done!")
     print()
@@ -106,34 +110,43 @@ def run_interactive():
 
         print(f"  {home} vs {away}")
         predictions = {}
-        predictions["poisson"] = poisson.predict(home, away, neutral)
-        predictions["dixon_coles"] = dc.predict(home, away, neutral)
-        predictions["elo"] = elo.predict_match(home, away, neutral)
-        predictions["massey"] = massey.predict(home, away, neutral)
-        predictions["form"] = form.predict(home, away, neutral)
-        predictions["head_to_head"] = h2h.predict(home, away, neutral)
-        predictions["market_odds"] = market.predict()
+        predictions["poisson"] = normalize_prediction("poisson", poisson.predict(home, away, neutral))
+        predictions["dixon_coles"] = normalize_prediction("dixon_coles", dc.predict(home, away, neutral))
+        predictions["elo"] = normalize_prediction("elo", elo.predict_match(home, away, neutral))
+        predictions["massey"] = normalize_prediction("massey", massey.predict(home, away, neutral))
+        predictions["form"] = normalize_prediction("form", form.predict(home, away, neutral))
+        predictions["head_to_head"] = normalize_prediction("head_to_head", h2h.predict(home, away, neutral))
+        predictions["market_odds"] = normalize_prediction("market_odds", market.predict())
         fq = knn.feature_vector(
             poisson.attack_strengths.get(home,1.0),poisson.defense_strengths.get(home,1.0),
             poisson.attack_strengths.get(away,1.0),poisson.defense_strengths.get(away,1.0),
             form.get_form_score(home)["form_score"],form.get_form_score(away)["form_score"],
             elo.get_rating(home),elo.get_rating(away),elo.get_rating(home)-elo.get_rating(away))
-        predictions["knn_similar"] = knn.predict(fq)
-        predictions["xgboost"] = xgb.predict(fq)
-        predictions["neural_net"] = nn.predict(fq)
-        preds_mc = list(predictions.values())
-        w_mc = [bma.get_weights().get(k,0.08) for k in predictions]
-        predictions["monte_carlo"] = mc.simulate(preds_mc, w_mc)
-        predictions["bayesian"] = bayes.predict(home, away, neutral)
+        predictions["knn_similar"] = normalize_prediction("knn_similar", knn.predict(fq))
+        predictions["xgboost"] = normalize_prediction("xgboost", xgb.predict(fq))
+        predictions["neural_net"] = normalize_prediction("neural_net", nn.predict(fq))
+        available = {
+            key: value for key, value in predictions.items()
+            if value.get("available") and bma.get_weights().get(key, 0) > 0
+        }
+        predictions["monte_carlo"] = normalize_prediction(
+            "monte_carlo",
+            mc.simulate(
+                list(available.values()),
+                [bma.get_weights()[key] for key in available],
+            ) if available else {"status": "unavailable"},
+        )
+        predictions["bayesian"] = normalize_prediction("bayesian", bayes.predict(home, away, neutral))
         blend = bma.blend(predictions)
 
-        home_p = [p["home_win"] for p in predictions.values()]
-        draw_p = [p["draw"] for p in predictions.values()]
-        away_p = [p["away_win"] for p in predictions.values()]
+        valid = [prediction for prediction in predictions.values() if prediction.get("available")]
+        home_p = [p["home_win"] for p in valid]
+        draw_p = [p["draw"] for p in valid]
+        away_p = [p["away_win"] for p in valid]
         import math
         std = lambda vs: math.sqrt(sum((x-sum(vs)/len(vs))**2 for x in vs)/len(vs))
-        conf = max(0,min(100,100*(1.0-(std(home_p)+std(draw_p)+std(away_p))/3*5)))
-        print_prediction(predictions, blend, conf)
+        agreement = max(0,min(100,100*(1.0-(std(home_p)+std(draw_p)+std(away_p))/3*5))) if len(valid) >= 2 else 0
+        print_prediction(predictions, blend, agreement)
 
 
 def run_web():

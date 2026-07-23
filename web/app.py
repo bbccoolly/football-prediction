@@ -1,4 +1,4 @@
-import sys, os, json, math, time
+import sys, os, json, math, time, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
@@ -20,6 +20,7 @@ from features.player_impact import PlayerImpact
 from features.builder import FeatureBuilder
 from ensemble.bma import BayesianModelAveraging
 from ensemble.stacker import StackingEnsemble
+from ensemble.prediction_contract import NoAvailableModelsError, normalize_prediction
 from config import *
 from data.history_db import load_history
 
@@ -64,12 +65,19 @@ _upcoming_matches_cache = []
 _fetch_errors = []
 _teams_cache = list(ALL_TEAMS)
 _initialized = False
+_model_init_lock = threading.RLock()
 
 def _init_models():
-    global _upcoming_matches_cache, _fetch_errors, _teams_cache, _initialized
-    if _initialized: return
+    global _initialized
+    if _initialized:
+        return
+    with _model_init_lock:
+        if _initialized:
+            return
+        _initialize_models_unlocked()
 
-    elo_model.load()
+def _initialize_models_unlocked():
+    global _upcoming_matches_cache, _fetch_errors, _teams_cache, _initialized
 
     # 从持久化历史数据库加载真实比赛数据
     try:
@@ -102,14 +110,17 @@ def _init_models():
 
     # 用历史数据初始化所有模型
     if history:
+        history_fingerprint = elo_model.fingerprint_matches(history)
+        if not elo_model.load(history_fingerprint):
+            print("[Init] 重建 ELO（数据或参数已变化）...")
+            elo_model.rebuild(history)
+            elo_model.save()
         strengths = build_strengths_from_results(history)
         poisson_model.set_team_strengths(strengths)
         dixon_coles_model.set_team_strengths(strengths)
         massey_model.fit(history)
         form_model.load_history(history)
         h2h_model.load_history(history)
-        elo_model.batch_update(history)
-        elo_model.save()
         for m in history[:100]:
             fv = knn_model.feature_vector(1.0,1.0,1.0,1.0,
                 form_model.get_form_score(m["home_team"])["form_score"],
@@ -118,6 +129,8 @@ def _init_models():
                 elo_model.get_rating(m["home_team"])-elo_model.get_rating(m["away_team"]))
             knn_model.add_match(fv, m.get("home_goals",0), m.get("away_goals",0))
         bayes_model.fit(history)
+    elif not elo_model.load():
+        print("[Init] 无历史数据和有效 ELO 产物，使用默认评分")
 
     for team, players in SAMPLE_PLAYERS.items():
         player_impact.set_squad(team, players)
@@ -164,7 +177,9 @@ def _init_models():
                         hg, ag = m.get("home_goals",0), m.get("away_goals",0)
                         y_res.append(0 if hg>ag else (1 if hg==ag else 2))
                         y_goals.append(hg+ag)
-                    except: continue
+                    except (KeyError, TypeError, ValueError) as exc:
+                        print(f"[Init] 跳过无效训练样本: {exc}")
+                        continue
 
                 if len(X_list) >= 50:
                     import numpy as np
@@ -191,7 +206,7 @@ def index():
         try:
             dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
             return dt.astimezone(timezone(timedelta(hours=8))).isoformat()
-        except:
+        except (TypeError, ValueError):
             return dt_str
     wc_matches.sort(key=_bj_key, reverse=True)
 
@@ -299,109 +314,269 @@ def api_search_matches():
         "data_available": len(_upcoming_matches_cache) > 0,
     })
 
-@app.route("/predict", methods=["POST"])
-def predict():
-    _init_models()
-    data = request.get_json()
-    home_team = data.get("home_team", "").strip()
-    away_team = data.get("away_team", "").strip()
-    league_cn = data.get("league", "世界杯")
-    league = LEAGUES.get(league_cn, "world_cup")
-    neutral = data.get("neutral", True)
+
+class PredictionInputError(ValueError):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+def _api_error(message, code, status, details=None):
+    return jsonify({
+        "error": message,
+        "error_code": code,
+        "details": details or [],
+    }), status
+
+
+def _parse_prediction_input(data, default_neutral=True):
+    if not isinstance(data, dict):
+        raise PredictionInputError("请求体必须是 JSON 对象", "INVALID_JSON")
+
+    home_team = str(data.get("home_team") or "").strip()
+    away_team = str(data.get("away_team") or "").strip()
+    if not home_team or not away_team:
+        raise PredictionInputError("请选择主队和客队", "MISSING_TEAMS")
+    if home_team == away_team:
+        raise PredictionInputError("主客队不能相同", "SAME_TEAM")
+
+    neutral = data.get("neutral", default_neutral)
+    if not isinstance(neutral, bool):
+        raise PredictionInputError("neutral 必须是布尔值", "INVALID_NEUTRAL")
+
+    odds_keys = ("home_odds", "draw_odds", "away_odds")
+    supplied = [data.get(key) not in (None, "") for key in odds_keys]
+    odds = (None, None, None)
+    if any(supplied):
+        if not all(supplied):
+            raise PredictionInputError("赔率必须同时提供主胜、平局和客胜", "INVALID_ODDS")
+        try:
+            odds = tuple(float(data[key]) for key in odds_keys)
+        except (TypeError, ValueError):
+            raise PredictionInputError("赔率必须是有效数字", "INVALID_ODDS") from None
+        if any(not math.isfinite(value) or value <= 1.0 for value in odds):
+            raise PredictionInputError("赔率必须是大于 1 的有限数字", "INVALID_ODDS")
+
     home_missing = data.get("home_missing", [])
     away_missing = data.get("away_missing", [])
-    home_odds = data.get("home_odds")
-    draw_odds = data.get("draw_odds")
-    away_odds = data.get("away_odds")
-    task_id = data.get("task_id", "default")
+    if not isinstance(home_missing, list) or not isinstance(away_missing, list):
+        raise PredictionInputError("缺阵球员必须使用数组", "INVALID_MISSING_PLAYERS")
 
-    if not home_team or not away_team:
-        return jsonify({"error":"请选择主队和客队"}), 400
-    if home_team == away_team:
-        return jsonify({"error":"主客队不能相同"}), 400
+    league_cn = str(data.get("league") or "世界杯")
+    return {
+        "home_team": home_team,
+        "away_team": away_team,
+        "league_cn": league_cn,
+        "league": LEAGUES.get(league_cn, "world_cup"),
+        "neutral": neutral,
+        "home_missing": home_missing,
+        "away_missing": away_missing,
+        "home_odds": odds[0],
+        "draw_odds": odds[1],
+        "away_odds": odds[2],
+        "task_id": str(data.get("task_id") or "default"),
+    }
 
-    _prediction_progress[task_id] = {"total":12,"done":0,"current":"准备中..."}
+
+def _safe_prediction(model_id, operation):
+    try:
+        raw_result = operation()
+    except Exception as exc:
+        print(f"[Predict] {model_id} failed: {exc}")
+        raw_result = {
+            "model": model_id,
+            "status": "error",
+            "warnings": ["prediction_failed"],
+        }
+    return normalize_prediction(model_id, raw_result)
+
+
+def _model_agreement(predictions):
+    valid = [prediction for prediction in predictions.values() if prediction.get("available")]
+    if len(valid) < 2:
+        return 0.0
+
+    deviations = []
+    for field in ("home_win", "draw", "away_win"):
+        values = [prediction[field] for prediction in valid]
+        average = sum(values) / len(values)
+        deviations.append(math.sqrt(sum((value - average) ** 2 for value in values) / len(values)))
+    return max(0.0, min(100.0, round(100 * (1.0 - sum(deviations) / 3 * 5), 1)))
+
+
+def _run_predictions(context, report_progress=None):
+    report_progress = report_progress or (lambda _done, _name: None)
+    home_team = context["home_team"]
+    away_team = context["away_team"]
+    neutral = context["neutral"]
+
+    request_player_impact = PlayerImpact()
+    for team, missing in (
+        (home_team, context["home_missing"]),
+        (away_team, context["away_missing"]),
+    ):
+        if team in SAMPLE_PLAYERS:
+            request_player_impact.set_squad(team, SAMPLE_PLAYERS[team])
+        request_player_impact.set_injuries(team, missing)
+    squad_info = request_player_impact.both_teams_impact(home_team, away_team)
+    home_adv = HOME_ADVANTAGE.get(
+        context["league_cn"], HOME_ADVANTAGE.get(context["league"], 0.35)
+    )
+
+    predictions = {}
+    steps = [
+        ("poisson", "泊松分布", lambda: poisson_model.predict(home_team, away_team, neutral)),
+        ("dixon_coles", "Dixon-Coles", lambda: dixon_coles_model.predict(home_team, away_team, neutral)),
+        ("elo", "ELO评级", lambda: elo_model.predict_match(home_team, away_team, neutral)),
+        ("massey", "Massey排名", lambda: massey_model.predict(home_team, away_team, neutral)),
+        ("form", "近期状态", lambda: form_model.predict(home_team, away_team, neutral)),
+        ("head_to_head", "交锋记录", lambda: h2h_model.predict(home_team, away_team, neutral)),
+    ]
+    for index, (model_id, display_name, operation) in enumerate(steps, start=1):
+        predictions[model_id] = _safe_prediction(model_id, operation)
+        report_progress(index, display_name)
+
+    def market_prediction():
+        if context["home_odds"] is not None:
+            return market_model.predict(
+                home_odds=context["home_odds"],
+                draw_odds=context["draw_odds"],
+                away_odds=context["away_odds"],
+            )
+        result = market_model.predict()
+        result["using_defaults"] = True
+        result["data_quality"] = 0.2
+        return result
+
+    predictions["market_odds"] = _safe_prediction("market_odds", market_prediction)
+    report_progress(7, "市场赔率")
+
+    knn_features = knn_model.feature_vector(
+        poisson_model.attack_strengths.get(home_team, 1.0),
+        poisson_model.defense_strengths.get(home_team, 1.0),
+        poisson_model.attack_strengths.get(away_team, 1.0),
+        poisson_model.defense_strengths.get(away_team, 1.0),
+        form_model.get_form_score(home_team)["form_score"],
+        form_model.get_form_score(away_team)["form_score"],
+        elo_model.get_rating(home_team), elo_model.get_rating(away_team),
+        elo_model.get_rating(home_team) - elo_model.get_rating(away_team),
+    )
+    predictions["knn_similar"] = _safe_prediction(
+        "knn_similar", lambda: knn_model.predict(knn_features)
+    )
+    report_progress(8, "KNN相似")
+
+    feature_data = feature_builder.build(
+        elo_home=elo_model.get_rating(home_team), elo_away=elo_model.get_rating(away_team),
+        atk_home=poisson_model.attack_strengths.get(home_team, 1.0),
+        atk_away=poisson_model.attack_strengths.get(away_team, 1.0),
+        def_home=poisson_model.defense_strengths.get(home_team, 1.0),
+        def_away=poisson_model.defense_strengths.get(away_team, 1.0),
+        form_home=form_model.get_form_score(home_team),
+        form_away=form_model.get_form_score(away_team),
+        h2h_stats=h2h_model.get_h2h(home_team, away_team),
+        squad_home=squad_info["home_completeness"],
+        squad_away=squad_info["away_completeness"],
+        home_adv=home_adv, neutral=neutral,
+    )
+    predictions["xgboost"] = _safe_prediction(
+        "xgboost", lambda: xgb_model.predict(feature_data["vector"])
+    )
+    report_progress(9, "XGBoost")
+    predictions["neural_net"] = _safe_prediction(
+        "neural_net", lambda: nn_model.predict(feature_data["vector"])
+    )
+    report_progress(10, "神经网络")
+
+    available_base = {
+        model_id: prediction for model_id, prediction in predictions.items()
+        if prediction.get("available") and bma.get_weights().get(model_id, 0) > 0
+    }
+    if available_base:
+        predictions["monte_carlo"] = _safe_prediction(
+            "monte_carlo",
+            lambda: mc_model.simulate(
+                list(available_base.values()),
+                [bma.get_weights()[model_id] for model_id in available_base],
+            ),
+        )
+    else:
+        predictions["monte_carlo"] = normalize_prediction("monte_carlo", {
+            "status": "unavailable", "warnings": ["no_available_base_models"]
+        })
+    report_progress(11, "蒙特卡洛")
+
+    predictions["bayesian"] = _safe_prediction(
+        "bayesian", lambda: bayes_model.predict(home_team, away_team, neutral)
+    )
+    report_progress(12, "贝叶斯层次")
+
+    ensemble_result = bma.blend(predictions)
+    model_agreement = _model_agreement(predictions)
+    warnings = list(bma.load_warnings)
+    for prediction in predictions.values():
+        warnings.extend(prediction.get("warnings", []))
+    warnings = list(dict.fromkeys(warnings))
+    if sum(1 for prediction in predictions.values() if prediction.get("available")) < 2:
+        warnings.append("insufficient_models_for_agreement")
+
+    model_summary = {
+        "total_models": len(predictions),
+        "available_models": sum(1 for prediction in predictions.values() if prediction.get("available")),
+        "excluded_models": sum(1 for prediction in predictions.values() if not prediction.get("available")),
+        "unknown_quality_models": sum(
+            1 for prediction in predictions.values()
+            if prediction.get("available") and prediction.get("data_quality") is None
+        ),
+        "using_defaults_models": sum(
+            1 for prediction in predictions.values() if prediction.get("using_defaults")
+        ),
+    }
+    return {
+        "predictions": predictions,
+        "ensemble": ensemble_result,
+        "model_agreement": model_agreement,
+        "model_summary": model_summary,
+        "warnings": warnings,
+        "squad_info": squad_info,
+        "htft": poisson_model.predict_htft(home_team, away_team, neutral),
+        "handicap": poisson_model.predict_handicap(home_team, away_team, neutral),
+    }
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    try:
+        context = _parse_prediction_input(request.get_json(silent=True), default_neutral=True)
+    except PredictionInputError as exc:
+        return _api_error(str(exc), exc.code, 400)
+    _init_models()
+
+    task_id = context["task_id"]
+    _prediction_progress[task_id] = {"total": 12, "done": 0, "current": "准备中..."}
     def report(n,name):
         if task_id in _prediction_progress:
             _prediction_progress[task_id]["done"]=n
             _prediction_progress[task_id]["current"]=name
-
-    for team, missing in [(home_team, home_missing), (away_team, away_missing)]:
-        if team in SAMPLE_PLAYERS: player_impact.set_squad(team, SAMPLE_PLAYERS[team])
-        player_impact.set_injuries(team, missing)
-    squad_info = player_impact.both_teams_impact(home_team, away_team)
-    home_adv = HOME_ADVANTAGE.get(league_cn, HOME_ADVANTAGE.get(league, 0.35))
-
-    predictions = {}
-    predictions["poisson"] = poisson_model.predict(home_team, away_team, neutral); report(1,"泊松分布")
-    predictions["htft"] = poisson_model.predict_htft(home_team, away_team, neutral)
-    htft_result = predictions.pop("htft")  # keep separate, not in model loop
-    predictions["dixon_coles"] = dixon_coles_model.predict(home_team, away_team, neutral); report(2,"Dixon-Coles")
-    predictions["elo"] = elo_model.predict_match(home_team, away_team, neutral); report(3,"ELO评级")
-    predictions["massey"] = massey_model.predict(home_team, away_team, neutral); report(4,"Massey排名")
-    predictions["form"] = form_model.predict(home_team, away_team, neutral); report(5,"近期状态")
-    predictions["head_to_head"] = h2h_model.predict(home_team, away_team, neutral); report(6,"交锋记录")
-
-    if home_odds and draw_odds and away_odds:
-        try:
-            predictions["market_odds"] = market_model.predict(home_odds=float(home_odds), draw_odds=float(draw_odds), away_odds=float(away_odds))
-        except: predictions["market_odds"] = market_model.predict()
-    else:
-        predictions["market_odds"] = market_model.predict()
-    report(7,"市场赔率")
-
-    fq = knn_model.feature_vector(
-        poisson_model.attack_strengths.get(home_team,1.0), poisson_model.defense_strengths.get(home_team,1.0),
-        poisson_model.attack_strengths.get(away_team,1.0), poisson_model.defense_strengths.get(away_team,1.0),
-        form_model.get_form_score(home_team)["form_score"], form_model.get_form_score(away_team)["form_score"],
-        elo_model.get_rating(home_team), elo_model.get_rating(away_team),
-        elo_model.get_rating(home_team)-elo_model.get_rating(away_team))
-    predictions["knn_similar"] = knn_model.predict(fq); report(8,"KNN相似")
-
-    fb = feature_builder.build(
-        elo_home=elo_model.get_rating(home_team), elo_away=elo_model.get_rating(away_team),
-        atk_home=poisson_model.attack_strengths.get(home_team,1.0), atk_away=poisson_model.attack_strengths.get(away_team,1.0),
-        def_home=poisson_model.defense_strengths.get(home_team,1.0), def_away=poisson_model.defense_strengths.get(away_team,1.0),
-        form_home=form_model.get_form_score(home_team), form_away=form_model.get_form_score(away_team),
-        h2h_stats=h2h_model.get_h2h(home_team, away_team),
-        squad_home=squad_info["home_completeness"], squad_away=squad_info["away_completeness"],
-        home_adv=home_adv, neutral=neutral)
-    predictions["xgboost"] = xgb_model.predict(fb["vector"]); report(9,"XGBoost")
     try:
-        predictions["neural_net"] = nn_model.predict(fb["vector"])
-    except:
-        predictions["neural_net"] = {"model":"neural_net","home_win":0.35,"draw":0.30,"away_win":0.35,"status":"error","data_quality":0.1,"data_valid":False,"missing_teams":[],"using_defaults":True}
-    report(10,"神经网络")
-
-    preds_mc = [v for v in predictions.values()]
-    w_mc = [bma.get_weights().get(k,0.08) for k in predictions.keys()]
-    predictions["monte_carlo"] = mc_model.simulate(preds_mc, w_mc); report(11,"蒙特卡洛")
-    predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral); report(12,"贝叶斯层次")
-
-    handicap_result = poisson_model.predict_handicap(home_team, away_team, neutral)
-    blend_result = bma.blend(predictions)
-
-        # Only use valid models for confidence calculation
-    valid_preds = {k: v for k, v in predictions.items() if v.get("data_valid", True)}
-    if not valid_preds:
-        valid_preds = predictions
-    home_probs = [p["home_win"] for p in valid_preds.values()]
-    draw_probs = [p["draw"] for p in valid_preds.values()]
-    away_probs = [p["away_win"] for p in valid_preds.values()]
-    std_h = math.sqrt(sum((x-sum(home_probs)/len(home_probs))**2 for x in home_probs)/len(home_probs))
-    std_d = math.sqrt(sum((x-sum(draw_probs)/len(draw_probs))**2 for x in draw_probs)/len(draw_probs))
-    std_a = math.sqrt(sum((x-sum(away_probs)/len(away_probs))**2 for x in away_probs)/len(away_probs))
-    confidence = max(0, min(100, round(100*(1.0-(std_h+std_d+std_a)/3*5), 1)))
+        result = _run_predictions(context, report)
+    except NoAvailableModelsError as exc:
+        return _api_error(str(exc), "NO_AVAILABLE_MODELS", 503)
+    except Exception as exc:
+        print(f"[Predict] unexpected failure: {exc}")
+        return _api_error("预测服务内部错误", "INTERNAL_ERROR", 500)
 
     return jsonify(_convert_numpy({
-        "home_team":home_team,"away_team":away_team,
-        "neutral":neutral,"league":league,
-        "squad_info":squad_info,
-        "predictions":predictions,
-        "htft":htft_result,
-        "ensemble":blend_result,
-        "handicap":handicap_result,
-        "confidence":confidence,
+        "home_team": context["home_team"], "away_team": context["away_team"],
+        "neutral": context["neutral"], "league": context["league"],
+        "squad_info": result["squad_info"],
+        "predictions": result["predictions"],
+        "htft": result["htft"],
+        "ensemble": result["ensemble"],
+        "handicap": result["handicap"],
+        "model_agreement": result["model_agreement"],
+        "confidence": result["model_agreement"],
+        "model_summary": result["model_summary"],
+        "warnings": result["warnings"],
     }))
 
 @app.route("/api/upcoming")
@@ -430,17 +605,17 @@ def api_refresh_data():
 @app.route("/api/debug_predict", methods=["POST"])
 def api_debug_predict():
     """返回完整计算过程"""
+    try:
+        context = _parse_prediction_input(request.get_json(silent=True), default_neutral=False)
+    except PredictionInputError as exc:
+        return _api_error(str(exc), exc.code, 400)
     _init_models()
-    data = request.get_json()
-    home_team = data.get("home_team", "").strip()
-    away_team = data.get("away_team", "").strip()
-    neutral = data.get("neutral", False)
-    home_odds = data.get("home_odds")
-    draw_odds = data.get("draw_odds")
-    away_odds = data.get("away_odds")
-
-    if not home_team or not away_team:
-        return jsonify({"error": "need teams"}), 400
+    home_team = context["home_team"]
+    away_team = context["away_team"]
+    neutral = context["neutral"]
+    home_odds = context["home_odds"]
+    draw_odds = context["draw_odds"]
+    away_odds = context["away_odds"]
 
     debug = {"home_team": home_team, "away_team": away_team, "neutral": neutral}
 
@@ -536,18 +711,15 @@ def api_debug_predict():
 
     # Market odds (prior)
     if home_odds and draw_odds and away_odds:
-        try:
-            ho = float(home_odds); do = float(draw_odds); ao = float(away_odds)
-            total = 1/ho + 1/do + 1/ao
-            steps["market_odds"] = {
-                "formula": "P = (1/odds) / (1/H + 1/D + 1/A), 即去水头归一化",
-                "odds_input": f"主{ho} / 平{do} / 客{ao}",
-                "raw_probs": f"主{1/ho:.4f} / 平{1/do:.4f} / 客{1/ao:.4f}",
-                "water_rate": f"{total:.4f}（水头 {(total-1)*100:.1f}%）",
-                "interpretation": f"赔率反推：市场认为主胜概率约 {1/ho/total*100:.1f}%",
-            }
-        except:
-            steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
+        ho = home_odds; do = draw_odds; ao = away_odds
+        total = 1/ho + 1/do + 1/ao
+        steps["market_odds"] = {
+            "formula": "P = (1/odds) / (1/H + 1/D + 1/A), 即去水头归一化",
+            "odds_input": f"主{ho} / 平{do} / 客{ao}",
+            "raw_probs": f"主{1/ho:.4f} / 平{1/do:.4f} / 客{1/ao:.4f}",
+            "water_rate": f"{total:.4f}（水头 {(total-1)*100:.1f}%）",
+            "interpretation": f"赔率反推：市场认为主胜概率约 {1/ho/total*100:.1f}%",
+        }
     else:
         steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
 
@@ -585,68 +757,30 @@ def api_debug_predict():
 
     debug["calculation_steps"] = steps
 
-    # ---- 模型输出 ----
-    predictions = {}
-    predictions["poisson"] = poisson_model.predict(home_team, away_team, neutral)
-    predictions["dixon_coles"] = dixon_coles_model.predict(home_team, away_team, neutral)
-    predictions["elo"] = elo_model.predict_match(home_team, away_team, neutral)
-    predictions["massey"] = massey_model.predict(home_team, away_team, neutral)
-    predictions["form"] = form_model.predict(home_team, away_team, neutral)
-    predictions["head_to_head"] = h2h_model.predict(home_team, away_team, neutral)
-    if home_odds and draw_odds and away_odds:
-        try:
-            predictions["market_odds"] = market_model.predict(home_odds=float(home_odds), draw_odds=float(draw_odds), away_odds=float(away_odds))
-        except:
-            predictions["market_odds"] = market_model.predict()
-    else:
-        predictions["market_odds"] = market_model.predict()
-
-    # ---- KNN / XGBoost / NeuralNet / MonteCarlo（与 /predict 一致）----
-    fq = knn_model.feature_vector(
-        poisson_model.attack_strengths.get(home_team,1.0), poisson_model.defense_strengths.get(home_team,1.0),
-        poisson_model.attack_strengths.get(away_team,1.0), poisson_model.defense_strengths.get(away_team,1.0),
-        form_model.get_form_score(home_team)["form_score"], form_model.get_form_score(away_team)["form_score"],
-        elo_model.get_rating(home_team), elo_model.get_rating(away_team),
-        elo_model.get_rating(home_team)-elo_model.get_rating(away_team))
-    predictions["knn_similar"] = knn_model.predict(fq)
-
-    fb_debug = feature_builder.build(
-        elo_home=elo_model.get_rating(home_team), elo_away=elo_model.get_rating(away_team),
-        atk_home=poisson_model.attack_strengths.get(home_team,1.0), atk_away=poisson_model.attack_strengths.get(away_team,1.0),
-        def_home=poisson_model.defense_strengths.get(home_team,1.0), def_away=poisson_model.defense_strengths.get(away_team,1.0),
-        form_home=form_model.get_form_score(home_team), form_away=form_model.get_form_score(away_team),
-        h2h_stats=h2h_model.get_h2h(home_team, away_team),
-        squad_home=1.0, squad_away=1.0,
-        home_adv=HOME_ADVANTAGE.get("default", 0.35), neutral=neutral)
-    predictions["xgboost"] = xgb_model.predict(fb_debug["vector"])
     try:
-        predictions["neural_net"] = nn_model.predict(fb_debug["vector"])
-    except:
-        predictions["neural_net"] = {"model":"neural_net","home_win":0.35,"draw":0.30,"away_win":0.35}
-
-    preds_mc_debug = [v for v in predictions.values()]
-    w_mc_debug = [bma.get_weights().get(k, 0.08) for k in predictions.keys()]
-    predictions["monte_carlo"] = mc_model.simulate(preds_mc_debug, w_mc_debug)
-
-    predictions["bayesian"] = bayes_model.predict(home_team, away_team, neutral)
-
-        # 让球胜负预测
-    handicap = poisson_model.predict_handicap(home_team, away_team, neutral)
-    
-    blend = bma.blend(predictions)
+        prediction_result = _run_predictions(context)
+    except NoAvailableModelsError as exc:
+        return _api_error(str(exc), "NO_AVAILABLE_MODELS", 503)
+    predictions = prediction_result["predictions"]
 
     debug["model_outputs"] = {k: {
-        "home_win": round(v.get("home_win",0), 4),
-        "draw": round(v.get("draw",0), 4),
-        "away_win": round(v.get("away_win",0), 4),
+        "home_win": round(v["home_win"], 4) if v.get("home_win") is not None else None,
+        "draw": round(v["draw"], 4) if v.get("draw") is not None else None,
+        "away_win": round(v["away_win"], 4) if v.get("away_win") is not None else None,
         "expected_goals": v.get("expected_total_goals"),
+        "available": v.get("available"),
+        "status": v.get("status"),
     } for k, v in predictions.items()}
 
-    debug["ensemble"] = blend
-    debug["weights"] = bma.get_weights()
+    debug["ensemble"] = prediction_result["ensemble"]
+    debug["weights"] = prediction_result["ensemble"]["effective_weights"]
+    debug["model_agreement"] = prediction_result["model_agreement"]
+    debug["model_summary"] = prediction_result["model_summary"]
+    debug["warnings"] = prediction_result["warnings"]
 
     # HTFT
-    debug["htft"] = poisson_model.predict_htft(home_team, away_team, neutral)
+    debug["htft"] = prediction_result["htft"]
+    debug["handicap"] = prediction_result["handicap"]
 
     return jsonify(_convert_numpy(debug))
 
@@ -858,7 +992,7 @@ def api_wc_matches():
             dt = datetime.fromisoformat(dt_str.replace("Z","+00:00"))
             bj_dt = dt.astimezone(timezone(timedelta(hours=8)))
             return bj_dt.isoformat()
-        except:
+        except (TypeError, ValueError):
             return dt_str
     wc.sort(key=bj_key, reverse=True)
     return jsonify({"count": len(wc), "matches": wc})
@@ -866,6 +1000,7 @@ def api_wc_matches():
 @app.route("/api/sync_fifa")
 def api_sync_fifa():
     """同步FIFA世界杯比赛数据"""
+    global elo_model, poisson_model
     from data.history_db import load_history, add_match
     from models.elo import EloRating
     from models.poisson import build_strengths_from_results
@@ -941,13 +1076,20 @@ def api_sync_fifa():
                         add_match(match)
                         db_keys.add(key)
                         added += 1
-            except: pass
+            except Exception as exc:
+                print(f"[FIFA] 同步区间 {sd} - {ed} 失败: {exc}")
 
         if added > 0:
             h2 = load_history()
-            elo = EloRating(); elo.load(); elo.batch_update(h2); elo.save()
+            refreshed_elo = EloRating()
+            refreshed_elo.rebuild(h2)
+            refreshed_elo.save()
             strengths = build_strengths_from_results(h2)
-            poisson_model.set_team_strengths(strengths)
+            refreshed_poisson = PoissonModel()
+            refreshed_poisson.set_team_strengths(strengths)
+            with _model_init_lock:
+                elo_model = refreshed_elo
+                poisson_model = refreshed_poisson
 
         return jsonify({"status":"ok","fetched":fetched,"added":added,"total_history":len(load_history())})
     except Exception as e:
