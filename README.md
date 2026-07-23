@@ -118,6 +118,8 @@ football-prediction/
 
 ## 算法校准
 
+项目的分阶段优化、测试门禁和模型准入规范见 [优化路线图](docs/optimization-roadmap.md)。
+
 ```bash
 # 完整校准（抓取数据 → 回测 → 更新权重）
 python calibrate.py
