@@ -1,36 +1,42 @@
-# ensemble/bma.py - 贝叶斯模型平均动态加权
+# ensemble/bma.py - 基于近期 Brier Score 的启发式动态加权
 
 import json
-import os
 import math
+import os
+from pathlib import Path
+
 from config import WEIGHTS_FILE, INITIAL_WEIGHTS, BMA_WINDOW
+from ensemble.prediction_contract import NoAvailableModelsError, normalize_prediction
 
 
 class BayesianModelAveraging:
-    """贝叶斯模型平均：根据各模型近期预测准确率动态调整权重"""
+    """根据各模型近期 Brier Score 动态调整权重。"""
 
-    def __init__(self):
+    SCHEMA_VERSION = 2
+
+    def __init__(self, weights_file=None):
+        self.weights_file = str(weights_file or WEIGHTS_FILE)
         self.weights = dict(INITIAL_WEIGHTS)
         self.performance_log = {name: [] for name in INITIAL_WEIGHTS}
+        self.load_warnings = []
+        self.file_metadata = {}
 
     def update(self, predictions: dict, actual_result: str):
-        for model_name, probs in predictions.items():
+        for model_name, raw_prediction in predictions.items():
+            prediction = normalize_prediction(model_name, raw_prediction)
+            if not prediction["available"]:
+                continue
             if model_name not in self.performance_log:
                 self.performance_log[model_name] = []
 
             target = {"H": [1, 0, 0], "D": [0, 1, 0], "A": [0, 0, 1]}[actual_result]
-            pred = [probs.get("home_win", 0.33),
-                    probs.get("draw", 0.34),
-                    probs.get("away_win", 0.33)]
-            brier = sum((p - t) ** 2 for p, t in zip(pred, target))
-
+            predicted = [prediction["home_win"], prediction["draw"], prediction["away_win"]]
+            brier = sum((value - expected) ** 2 for value, expected in zip(predicted, target))
             self.performance_log[model_name].append({
-                "brier": brier, "probs": pred, "actual": actual_result,
+                "brier": brier, "probs": predicted, "actual": actual_result,
             })
-
             if len(self.performance_log[model_name]) > BMA_WINDOW * 2:
-                self.performance_log[model_name] = \
-                    self.performance_log[model_name][-BMA_WINDOW:]
+                self.performance_log[model_name] = self.performance_log[model_name][-BMA_WINDOW:]
 
         self._recompute_weights()
 
@@ -41,10 +47,10 @@ class BayesianModelAveraging:
             if not recent:
                 model_scores[name] = 0.5
             else:
-                avg_brier = sum(r["brier"] for r in recent) / len(recent)
+                avg_brier = sum(row["brier"] for row in recent) / len(recent)
                 model_scores[name] = max(0.1, 2.0 - avg_brier)
 
-        total = sum(model_scores.values())
+        total = sum(model_scores.get(name, 0.5) for name in self.weights)
         if total > 0:
             for name in self.weights:
                 self.weights[name] = model_scores.get(name, 0.5) / total
@@ -52,60 +58,130 @@ class BayesianModelAveraging:
     def get_weights(self) -> dict:
         return dict(self.weights)
 
+    def _effective_predictions(self, predictions):
+        normalized = {}
+        excluded = []
+        candidates = {}
+
+        for model_name, raw_prediction in predictions.items():
+            prediction = normalize_prediction(model_name, raw_prediction)
+            normalized[model_name] = prediction
+            configured_weight = self.weights.get(model_name, 0.0)
+            if not prediction["available"]:
+                excluded.append({
+                    "model_id": model_name,
+                    "status": prediction["status"],
+                    "reason": ",".join(prediction.get("warnings", [])) or "model_unavailable",
+                })
+            elif not math.isfinite(configured_weight) or configured_weight <= 0:
+                excluded.append({
+                    "model_id": model_name,
+                    "status": "no_weight",
+                    "reason": "no_configured_weight",
+                })
+            else:
+                candidates[model_name] = prediction
+
+        total_weight = sum(self.weights[name] for name in candidates)
+        if not candidates or total_weight <= 0:
+            raise NoAvailableModelsError("当前没有可用预测模型")
+
+        effective_weights = {
+            name: self.weights[name] / total_weight for name in candidates
+        }
+        return candidates, normalized, effective_weights, excluded
+
     def blend(self, predictions: dict) -> dict:
-        home = 0.0
-        draw = 0.0
-        away = 0.0
-        total_weight = 0.0
+        candidates, _, effective_weights, excluded = self._effective_predictions(predictions)
 
-        for model_name, probs in predictions.items():
-            w = self.weights.get(model_name, 0.05)
-            home += probs.get("home_win", 0.33) * w
-            draw += probs.get("draw", 0.34) * w
-            away += probs.get("away_win", 0.33) * w
-            total_weight += w
+        home = sum(candidates[name]["home_win"] * weight for name, weight in effective_weights.items())
+        draw = sum(candidates[name]["draw"] * weight for name, weight in effective_weights.items())
+        away = sum(candidates[name]["away_win"] * weight for name, weight in effective_weights.items())
 
-        if total_weight > 0:
-            home /= total_weight
-            draw /= total_weight
-            away /= total_weight
+        goal_values = []
+        for name, prediction in candidates.items():
+            value = prediction.get("expected_total_goals")
+            if isinstance(value, (int, float)) and math.isfinite(value) and 0.5 <= value <= 8.0:
+                goal_values.append((float(value), effective_weights[name]))
+        goal_weight = sum(weight for _, weight in goal_values)
+        avg_goals = (
+            sum(value * weight for value, weight in goal_values) / goal_weight
+            if goal_weight > 0 else 2.7
+        )
 
-        # 收集预期进球（过滤异常值 0.5~8.0）
-        expected_goals_list = []
-        for probs in predictions.values():
-            if "expected_total_goals" in probs:
-                eg = probs["expected_total_goals"]
-                if 0.5 <= eg <= 8.0:
-                    expected_goals_list.append(eg)
-        avg_goals = sum(expected_goals_list) / len(expected_goals_list) if expected_goals_list else 2.7
-
-        # 收集比分预测
         score_probs = {}
-        n_preds = len(predictions)
-        for probs in predictions.values():
-            for score, p in probs.get("top_scores", []):
-                score_probs[score] = score_probs.get(score, 0) + p / n_preds
-        top_scores = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)[:5]
+        for name, prediction in candidates.items():
+            for score, probability in prediction.get("top_scores", []):
+                if isinstance(probability, (int, float)) and math.isfinite(probability):
+                    score_probs[score] = score_probs.get(score, 0.0) + probability * effective_weights[name]
+        top_scores = sorted(score_probs.items(), key=lambda item: item[1], reverse=True)[:5]
 
+        rounded_effective = {name: round(weight, 4) for name, weight in effective_weights.items()}
         return {
             "home_win": round(home, 4),
             "draw": round(draw, 4),
             "away_win": round(away, 4),
             "expected_total_goals": round(avg_goals, 2),
-            "top_scores": [(s, round(p, 4)) for s, p in top_scores],
-            "weights": {k: round(v, 4) for k, v in self.weights.items()},
+            "top_scores": [(score, round(probability, 4)) for score, probability in top_scores],
+            "configured_weights": {name: round(weight, 4) for name, weight in self.weights.items()},
+            "effective_weights": rounded_effective,
+            "excluded_models": excluded,
+            "weights": rounded_effective,
         }
 
     def save(self):
-        os.makedirs(os.path.dirname(WEIGHTS_FILE), exist_ok=True)
-        with open(WEIGHTS_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "weights": self.weights,
-                "log_count": {k: len(v) for k, v in self.performance_log.items()},
-            }, f, ensure_ascii=False, indent=2)
+        path = Path(self.weights_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        data = {
+            **self.file_metadata,
+            "schema_version": self.SCHEMA_VERSION,
+            "weights": self.weights,
+            "log_count": {name: len(log) for name, log in self.performance_log.items()},
+        }
+        try:
+            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp_path, path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     def load(self):
-        if os.path.exists(WEIGHTS_FILE):
-            with open(WEIGHTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                self.weights = data.get("weights", dict(INITIAL_WEIGHTS))
+        self.load_warnings = []
+        path = Path(self.weights_file)
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw_weights = data.get("weights", {})
+            if not isinstance(raw_weights, dict):
+                raise ValueError("weights must be an object")
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            self.weights = dict(INITIAL_WEIGHTS)
+            self.load_warnings.append("weights_file_invalid")
+            return False
+
+        migrated = dict(raw_weights)
+        self.file_metadata = {
+            key: value for key, value in data.items()
+            if key not in {"schema_version", "weights", "log_count"}
+        }
+        needs_save = data.get("schema_version") != self.SCHEMA_VERSION
+        if "knn" in migrated:
+            if "knn_similar" not in migrated:
+                migrated["knn_similar"] = migrated["knn"]
+            del migrated["knn"]
+            self.load_warnings.append("knn_key_migrated")
+            needs_save = True
+
+        sanitized = {}
+        for name, default_weight in INITIAL_WEIGHTS.items():
+            value = migrated.get(name, default_weight)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                value = default_weight
+                self.load_warnings.append(f"invalid_weight:{name}")
+            sanitized[name] = float(value)
+        self.weights = sanitized
+        if needs_save:
+            self.save()
+        return True

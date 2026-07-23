@@ -67,6 +67,16 @@ class XGBoostModel:
                 "status": "not_trained",
             }
 
+        features = np.asarray(features)
+        expected_features = getattr(self.classifier, "n_features_in_", features.size)
+        if features.size != expected_features:
+            return {
+                "model": "xgboost",
+                "status": "incompatible_features",
+                "expected_features": int(expected_features),
+                "actual_features": int(features.size),
+            }
+
         X = features.reshape(1, -1)
         proba = self.classifier.predict_proba(X)[0]
 

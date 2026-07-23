@@ -8,7 +8,7 @@ from config import MODEL_DIR
 class NeuralNetModel:
     """2-3 层全连接神经网络：胜平负概率预测"""
 
-    def __init__(self, input_dim: int = 16, hidden_dims: list = None):
+    def __init__(self, input_dim: int = 18, hidden_dims: list = None):
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims or [32, 16]
         self.model = None
@@ -107,6 +107,15 @@ class NeuralNetModel:
                 "status": "not_trained",
             }
 
+        features = np.asarray(features)
+        if features.size != self.input_dim:
+            return {
+                "model": "neural_net",
+                "status": "incompatible_features",
+                "expected_features": self.input_dim,
+                "actual_features": int(features.size),
+            }
+
         X = (features.reshape(1, -1) - self.scaler_mean) / self.scaler_std
         probs, _ = self._forward(X, self.weights, self.biases)
 
@@ -132,10 +141,21 @@ class NeuralNetModel:
         if not os.path.exists(path):
             return
         data = np.load(path, allow_pickle=True)
-        files = list(data.keys())
-        n_layers = (len(files) - 2) // 2  # 减去 scaler_mean, scaler_std
+        array_keys = sorted(
+            (key for key in data.keys() if key.startswith("arr_")),
+            key=lambda key: int(key.split("_")[1]),
+        )
+        n_layers = len(array_keys) // 2
         self.weights = [data[f"arr_{i}"] for i in range(n_layers)]
         self.biases = [data[f"arr_{i + n_layers}"] for i in range(n_layers)]
-        self.scaler_mean = data["arr_" + str(2 * n_layers)].item() if f"arr_{2 * n_layers}" in data else None
-        self.scaler_std = data["arr_" + str(2 * n_layers + 1)].item() if f"arr_{2 * n_layers + 1}" in data else None
-        self.is_trained = True
+        self.scaler_mean = data["scaler_mean"] if "scaler_mean" in data else None
+        self.scaler_std = data["scaler_std"] if "scaler_std" in data else None
+        compatible = (
+            n_layers > 0
+            and self.weights[0].shape[0] == self.input_dim
+            and self.scaler_mean is not None
+            and self.scaler_std is not None
+            and self.scaler_mean.size == self.input_dim
+            and self.scaler_std.size == self.input_dim
+        )
+        self.is_trained = bool(compatible)
