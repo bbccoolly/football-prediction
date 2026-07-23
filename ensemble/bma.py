@@ -12,7 +12,8 @@ from ensemble.prediction_contract import NoAvailableModelsError, normalize_predi
 class BayesianModelAveraging:
     """根据各模型近期 Brier Score 动态调整权重。"""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
+    DERIVED_MODEL_IDS = frozenset({"monte_carlo"})
 
     def __init__(self, weights_file=None):
         self.weights_file = str(weights_file or WEIGHTS_FILE)
@@ -23,6 +24,8 @@ class BayesianModelAveraging:
 
     def update(self, predictions: dict, actual_result: str):
         for model_name, raw_prediction in predictions.items():
+            if model_name in self.DERIVED_MODEL_IDS or raw_prediction.get("role") == "derived":
+                continue
             prediction = normalize_prediction(model_name, raw_prediction)
             if not prediction["available"]:
                 continue
@@ -50,13 +53,23 @@ class BayesianModelAveraging:
                 avg_brier = sum(row["brier"] for row in recent) / len(recent)
                 model_scores[name] = max(0.1, 2.0 - avg_brier)
 
-        total = sum(model_scores.get(name, 0.5) for name in self.weights)
+        independent_names = [
+            name for name in self.weights if name not in self.DERIVED_MODEL_IDS
+        ]
+        total = sum(model_scores.get(name, 0.5) for name in independent_names)
         if total > 0:
-            for name in self.weights:
+            for name in independent_names:
                 self.weights[name] = model_scores.get(name, 0.5) / total
+        for name in self.DERIVED_MODEL_IDS:
+            if name in self.weights:
+                self.weights[name] = 0.0
 
     def get_weights(self) -> dict:
-        return dict(self.weights)
+        weights = dict(self.weights)
+        for name in self.DERIVED_MODEL_IDS:
+            if name in weights:
+                weights[name] = 0.0
+        return weights
 
     def _effective_predictions(self, predictions):
         normalized = {}
@@ -67,7 +80,13 @@ class BayesianModelAveraging:
             prediction = normalize_prediction(model_name, raw_prediction)
             normalized[model_name] = prediction
             configured_weight = self.weights.get(model_name, 0.0)
-            if not prediction["available"]:
+            if model_name in self.DERIVED_MODEL_IDS or raw_prediction.get("role") == "derived":
+                excluded.append({
+                    "model_id": model_name,
+                    "status": "derived",
+                    "reason": "derived_output",
+                })
+            elif not prediction["available"]:
                 excluded.append({
                     "model_id": model_name,
                     "status": prediction["status"],
@@ -123,7 +142,9 @@ class BayesianModelAveraging:
             "away_win": round(away, 4),
             "expected_total_goals": round(avg_goals, 2),
             "top_scores": [(score, round(probability, 4)) for score, probability in top_scores],
-            "configured_weights": {name: round(weight, 4) for name, weight in self.weights.items()},
+            "configured_weights": {
+                name: round(weight, 4) for name, weight in self.get_weights().items()
+            },
             "effective_weights": rounded_effective,
             "excluded_models": excluded,
             "weights": rounded_effective,
@@ -174,6 +195,12 @@ class BayesianModelAveraging:
             self.load_warnings.append("knn_key_migrated")
             needs_save = True
 
+        monte_carlo_weight = migrated.get("monte_carlo", 0.0)
+        if monte_carlo_weight != 0:
+            self.load_warnings.append("monte_carlo_weight_disabled")
+            needs_save = True
+        migrated["monte_carlo"] = 0.0
+
         sanitized = {}
         for name, default_weight in INITIAL_WEIGHTS.items():
             value = migrated.get(name, default_weight)
@@ -181,6 +208,7 @@ class BayesianModelAveraging:
                 value = default_weight
                 self.load_warnings.append(f"invalid_weight:{name}")
             sanitized[name] = float(value)
+        sanitized["monte_carlo"] = 0.0
         self.weights = sanitized
         if needs_save:
             self.save()

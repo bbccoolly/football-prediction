@@ -1,4 +1,5 @@
-import sys, os, json, math, time, threading
+import sys, os, json, math, time, threading, hmac
+from functools import wraps
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
@@ -329,6 +330,33 @@ def _api_error(message, code, status, details=None):
     }), status
 
 
+def _admin_required(operation):
+    @wraps(operation)
+    def wrapped(*args, **kwargs):
+        expected_token = os.environ.get("FOOTBALL_ADMIN_TOKEN")
+        if not expected_token:
+            return _api_error(
+                "管理令牌尚未配置",
+                "ADMIN_TOKEN_NOT_CONFIGURED",
+                503,
+            )
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, supplied_token = authorization.partition(" ")
+        if (
+            not separator
+            or scheme.lower() != "bearer"
+            or not hmac.compare_digest(supplied_token, expected_token)
+        ):
+            return _api_error(
+                "需要有效的管理令牌",
+                "ADMIN_AUTH_REQUIRED",
+                401,
+            )
+        return operation(*args, **kwargs)
+
+    return wrapped
+
+
 def _parse_prediction_input(data, default_neutral=True):
     if not isinstance(data, dict):
         raise PredictionInputError("请求体必须是 JSON 对象", "INVALID_JSON")
@@ -443,10 +471,7 @@ def _run_predictions(context, report_progress=None):
                 draw_odds=context["draw_odds"],
                 away_odds=context["away_odds"],
             )
-        result = market_model.predict()
-        result["using_defaults"] = True
-        result["data_quality"] = 0.2
-        return result
+        return market_model.predict()
 
     predictions["market_odds"] = _safe_prediction("market_odds", market_prediction)
     report_progress(7, "市场赔率")
@@ -488,53 +513,49 @@ def _run_predictions(context, report_progress=None):
     )
     report_progress(10, "神经网络")
 
-    available_base = {
-        model_id: prediction for model_id, prediction in predictions.items()
-        if prediction.get("available") and bma.get_weights().get(model_id, 0) > 0
-    }
-    if available_base:
-        predictions["monte_carlo"] = _safe_prediction(
-            "monte_carlo",
-            lambda: mc_model.simulate(
-                list(available_base.values()),
-                [bma.get_weights()[model_id] for model_id in available_base],
-            ),
-        )
-    else:
-        predictions["monte_carlo"] = normalize_prediction("monte_carlo", {
-            "status": "unavailable", "warnings": ["no_available_base_models"]
-        })
-    report_progress(11, "蒙特卡洛")
-
     predictions["bayesian"] = _safe_prediction(
         "bayesian", lambda: bayes_model.predict(home_team, away_team, neutral)
     )
-    report_progress(12, "贝叶斯层次")
+    report_progress(11, "贝叶斯层次")
 
     ensemble_result = bma.blend(predictions)
-    model_agreement = _model_agreement(predictions)
+    independent_predictions = dict(predictions)
+    simulation = mc_model.simulate([ensemble_result], [1.0])
+    simulation["role"] = "derived"
+    simulation["source"] = "ensemble"
+    predictions["monte_carlo"] = {
+        **simulation,
+        "model_id": "monte_carlo",
+        "available": False,
+        "status": "derived",
+        "warnings": ["derived_output"],
+    }
+    report_progress(12, "蒙特卡洛模拟")
+
+    model_agreement = _model_agreement(independent_predictions)
     warnings = list(bma.load_warnings)
-    for prediction in predictions.values():
+    for prediction in independent_predictions.values():
         warnings.extend(prediction.get("warnings", []))
     warnings = list(dict.fromkeys(warnings))
-    if sum(1 for prediction in predictions.values() if prediction.get("available")) < 2:
+    if sum(1 for prediction in independent_predictions.values() if prediction.get("available")) < 2:
         warnings.append("insufficient_models_for_agreement")
 
     model_summary = {
-        "total_models": len(predictions),
-        "available_models": sum(1 for prediction in predictions.values() if prediction.get("available")),
-        "excluded_models": sum(1 for prediction in predictions.values() if not prediction.get("available")),
+        "total_models": len(independent_predictions),
+        "available_models": sum(1 for prediction in independent_predictions.values() if prediction.get("available")),
+        "excluded_models": sum(1 for prediction in independent_predictions.values() if not prediction.get("available")),
         "unknown_quality_models": sum(
-            1 for prediction in predictions.values()
+            1 for prediction in independent_predictions.values()
             if prediction.get("available") and prediction.get("data_quality") is None
         ),
         "using_defaults_models": sum(
-            1 for prediction in predictions.values() if prediction.get("using_defaults")
+            1 for prediction in independent_predictions.values() if prediction.get("using_defaults")
         ),
     }
     return {
         "predictions": predictions,
         "ensemble": ensemble_result,
+        "simulation": simulation,
         "model_agreement": model_agreement,
         "model_summary": model_summary,
         "warnings": warnings,
@@ -572,6 +593,7 @@ def predict():
         "predictions": result["predictions"],
         "htft": result["htft"],
         "ensemble": result["ensemble"],
+        "simulation": result.get("simulation"),
         "handicap": result["handicap"],
         "model_agreement": result["model_agreement"],
         "confidence": result["model_agreement"],
@@ -583,7 +605,8 @@ def predict():
 def api_upcoming():
     return jsonify({"upcoming":_upcoming_matches_cache[:80],"count":len(_upcoming_matches_cache),"data_available":len(_upcoming_matches_cache)>0})
 
-@app.route("/api/refresh_data")
+@app.route("/api/refresh_data", methods=["POST"])
+@_admin_required
 def api_refresh_data():
     global _upcoming_matches_cache, _teams_cache, _fetch_errors
     try:
@@ -709,7 +732,7 @@ def api_debug_predict():
         "record": f"{h2h.get('a_wins',0)}胜{h2h.get('draws',0)}平{h2h.get('b_wins',0)}负",
     }
 
-    # Market odds (prior)
+    # Market odds
     if home_odds and draw_odds and away_odds:
         ho = home_odds; do = draw_odds; ao = away_odds
         total = 1/ho + 1/do + 1/ao
@@ -721,7 +744,7 @@ def api_debug_predict():
             "interpretation": f"赔率反推：市场认为主胜概率约 {1/ho/total*100:.1f}%",
         }
     else:
-        steps["market_odds"] = {"note": "未输入赔率时使用先验 45/28/27"}
+        steps["market_odds"] = {"note": "未输入真实赔率，市场模型退出本次融合"}
 
     # KNN
     steps["knn_similar"] = {
@@ -742,10 +765,9 @@ def api_debug_predict():
     }
 
     # Monte Carlo
-    mc_model_count = 11  # 模拟时使用的模型数量
     steps["monte_carlo"] = {
         "simulations": 10000,
-        "note": f"基于前{mc_model_count}个模型的概率分布，按权重随机选模型→按概率决定胜负→采样具体比分，重复10000次取平均",
+        "note": "对最终融合概率进行派生采样，不作为独立模型重复参与融合",
     }
 
     # Bayesian
@@ -773,6 +795,7 @@ def api_debug_predict():
     } for k, v in predictions.items()}
 
     debug["ensemble"] = prediction_result["ensemble"]
+    debug["simulation"] = prediction_result.get("simulation")
     debug["weights"] = prediction_result["ensemble"]["effective_weights"]
     debug["model_agreement"] = prediction_result["model_agreement"]
     debug["model_summary"] = prediction_result["model_summary"]
@@ -997,7 +1020,8 @@ def api_wc_matches():
     wc.sort(key=bj_key, reverse=True)
     return jsonify({"count": len(wc), "matches": wc})
 
-@app.route("/api/sync_fifa")
+@app.route("/api/sync_fifa", methods=["POST"])
+@_admin_required
 def api_sync_fifa():
     """同步FIFA世界杯比赛数据"""
     global elo_model, poisson_model
@@ -1116,7 +1140,8 @@ def rankings_page():
 def calibrate_page():
     return render_template("calibrate.html")
 
-@app.route("/api/calibrate/run")
+@app.route("/api/calibrate/run", methods=["POST"])
+@_admin_required
 def api_calibrate_run():
     """启动校准（后台运行 calibrate.py）"""
     import json, os, subprocess, sys
@@ -1137,28 +1162,44 @@ def api_calibrate_run():
         return jsonify({"status": "started", "message": "calibrate.py 已在后台启动，约需 1-3 分钟"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-@app.route("/api/lottery/predict/<lottery_key>")
-@app.route("/api/lottery/predict/<lottery_key>")
-def api_lottery_predict(lottery_key):
-    """prediction API: ?force=1 refresh data, ?regen=1 regenerate only"""
+def _lottery_prediction(lottery_key, force_refresh=False):
     from lottery_fetcher import fetch_lottery
-    from lottery_predictor import full_analysis, generate_prediction
-    force = request.args.get("force", "0") == "1"
-    regen = request.args.get("regen", "0") == "1"
+    from lottery_predictor import full_analysis
     try:
-        history = fetch_lottery(lottery_key, count=50, force_refresh=force)
+        history = fetch_lottery(
+            lottery_key,
+            count=50,
+            force_refresh=force_refresh,
+        )
         if not history:
             return jsonify({"error": f"no data for {lottery_key}"}), 404
-
-        if regen:
-            analysis = full_analysis(lottery_key, history)
-            return jsonify(analysis)
-
         analysis = full_analysis(lottery_key, history)
         return jsonify(analysis)
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lottery/predict/<lottery_key>", methods=["GET"])
+def api_lottery_predict(lottery_key):
+    """使用现有数据生成彩票统计分析。"""
+    if request.args.get("force") == "1" or request.args.get("regen") == "1":
+        return _api_error(
+            "强制刷新必须使用受保护的 POST 请求",
+            "WRITE_REQUIRES_POST",
+            405,
+        )
+    return _lottery_prediction(lottery_key)
+
+
+@app.route("/api/lottery/predict/<lottery_key>", methods=["POST"])
+@_admin_required
+def api_lottery_predict_refresh(lottery_key):
+    """刷新数据并重新生成彩票统计分析。"""
+    payload = request.get_json(silent=True) or {}
+    return _lottery_prediction(
+        lottery_key,
+        force_refresh=bool(payload.get("force_refresh", False)),
+    )
 @app.route("/api/calibrate/status")
 def api_calibrate_status():
     """查询校准状态（读取 calibrate.py 写入的状态文件）"""
@@ -1196,7 +1237,7 @@ def lottery_page():
     """彩票开奖结果页面"""
     return render_template("lottery.html")
 
-@app.route("/api/lottery")
+@app.route("/api/lottery", methods=["GET"])
 def api_lottery():
     """获取彩票开奖数据"""
     try:
@@ -1204,9 +1245,20 @@ def api_lottery():
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lottery", methods=["POST"])
+@_admin_required
+def api_lottery_refresh():
+    """强制刷新彩票开奖数据。"""
+    try:
+        data = _fetch_all_lottery(count=30, force_refresh=True)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__ == "__main__":
     print("\n"+"="*60)
     print("  Soccer Prediction System v2.1")
-    print("  12 Algorithms | Real Data Only")
+    print("  11 Models | Derived Simulation | Real Data Only")
     print("="*60)
     app.run(debug=False, host="127.0.0.1", port=5000)

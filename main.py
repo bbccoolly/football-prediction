@@ -27,7 +27,7 @@ def print_banner():
     print()
     print("=" * 60)
     print("  Soccer Prediction System v2.0")
-    print("  12 Algorithms | Bayesian Ensemble | World Cup")
+    print("  11 Models | Bayesian Ensemble | Derived Simulation")
     print("=" * 60)
     print()
 

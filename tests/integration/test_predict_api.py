@@ -133,3 +133,59 @@ def test_predict_and_debug_use_same_prediction_pipeline(client, monkeypatch):
     assert calls == ["甲", "甲"]
     assert prediction["ensemble"] == debug["ensemble"]
     assert debug["model_outputs"]["poisson"]["home_win"] == 0.4
+
+
+@pytest.mark.parametrize("path", [
+    "/api/refresh_data",
+    "/api/sync_fifa",
+    "/api/calibrate/run",
+])
+def test_admin_write_endpoints_reject_get(client, path):
+    assert client.get(path).status_code == 405
+
+
+@pytest.mark.parametrize("path", [
+    "/api/refresh_data",
+    "/api/sync_fifa",
+    "/api/calibrate/run",
+    "/api/lottery",
+    "/api/lottery/predict/dlt",
+])
+def test_admin_write_endpoints_require_configured_token(client, monkeypatch, path):
+    monkeypatch.delenv("FOOTBALL_ADMIN_TOKEN", raising=False)
+
+    response = client.post(path, json={})
+
+    assert response.status_code == 503
+    assert response.get_json()["error_code"] == "ADMIN_TOKEN_NOT_CONFIGURED"
+
+
+def test_admin_write_endpoint_rejects_wrong_token(client, monkeypatch):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+
+    response = client.post(
+        "/api/refresh_data",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error_code"] == "ADMIN_AUTH_REQUIRED"
+
+
+def test_refresh_accepts_valid_admin_token(client, monkeypatch):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    monkeypatch.setattr(
+        "data.fetcher.load_or_fetch",
+        lambda force_refresh=False: {
+            "upcoming": [{"home_team": "甲", "away_team": "乙"}],
+            "errors": [],
+        },
+    )
+
+    response = client.post(
+        "/api/refresh_data",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"

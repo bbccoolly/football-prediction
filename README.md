@@ -1,12 +1,12 @@
 # ⚽ 足球比赛预测系统
 
-基于 **12 个候选模型** 的足球比赛预测系统，融合泊松分布、ELO 评级、蒙特卡洛模拟、贝叶斯层次模型等，覆盖胜平负、让球胜负、比分、进球数、半全场等预测。未训练或输出非法的模型不会参与最终融合。
+基于 **11 个独立候选模型** 的足球比赛预测系统，融合泊松分布、ELO 评级、贝叶斯层次模型等，覆盖胜平负、让球胜负、比分、进球数、半全场等预测。蒙特卡洛只对最终融合结果进行派生采样；未训练、无真实输入或输出非法的模型不会参与最终融合。
 
 ## 功能特性
 
 | 功能 | 说明 |
 |------|------|
-| 🎯 12 个候选模型 | 泊松 / Dixon-Coles / ELO / Massey / 近期状态 / 交锋记录 / 市场赔率 / KNN / XGBoost / 神经网络 / 蒙特卡洛 / 贝叶斯层次；未训练或输出非法的模型自动退出融合 |
+| 🎯 11 个独立候选模型 | 泊松 / Dixon-Coles / ELO / Massey / 近期状态 / 交锋记录 / 市场赔率 / KNN / XGBoost / 神经网络 / 贝叶斯层次；蒙特卡洛作为融合后的派生模拟 |
 | 📊 动态融合 | 基于 Brier Score 的启发式动态权重，并按本次有效模型重新归一化 |
 | 🎰 让球胜负 | ±1 / ±1.5 / ±2 共 7 个盘口的概率计算 |
 | 📈 半全场 | 半场/全场组合概率分布 |
@@ -50,6 +50,15 @@ python run.py
 
 浏览器打开 **http://127.0.0.1:5000**
 
+刷新数据、FIFA 同步、校准和彩票强制刷新需要管理令牌：
+
+```powershell
+$env:FOOTBALL_ADMIN_TOKEN = "your-secret-token"
+python run.py
+```
+
+默认只监听 `127.0.0.1:5000`。可通过 `FOOTBALL_HOST` 和 `FOOTBALL_PORT` 修改；监听非回环地址时必须配置管理令牌。
+
 > 首次启动会尝试抓取 OpenLigaDB 单赛季德甲和 500.com 近期完场数据，通常为 300 场以上；数量和耗时取决于网络与源站可用性。
 
 ### 命令行模式
@@ -79,14 +88,14 @@ football-prediction/
 │       ├── css/style.css         #   深色主题 UI
 │       └── js/app.js             #   前端交互逻辑
 │
-├── models/                       # 12 个预测模型
+├── models/                       # 11 个独立模型 + 蒙特卡洛派生模拟
 │   ├── poisson.py                #   泊松分布（让球·半全场·比分）
 │   ├── dixon_coles.py            #   Dixon-Coles 低分修正
 │   ├── elo.py                    #   ELO 动态评级系统
 │   ├── massey.py                 #   Massey 最小二乘排名
 │   ├── form.py                   #   近期状态分析
 │   ├── head_to_head.py           #   历史交锋统计
-│   ├── market_odds.py            #   市场赔率先验
+│   ├── market_odds.py            #   真实市场赔率
 │   ├── knn_similar.py            #   KNN 相似比赛匹配
 │   ├── xgboost_model.py          #   XGBoost 梯度提升
 │   ├── neural_net.py             #   3 层全连接神经网络
@@ -168,28 +177,30 @@ python calibrate_cli.py --quick
 | `/api/debug_predict` | POST | 查看完整计算过程 |
 | `/api/search_matches` | GET | 搜索比赛/交锋/近期 |
 | `/api/upcoming` | GET | 待开赛比赛列表 |
-| `/api/refresh_data` | GET | 刷新线上数据 |
+| `/api/refresh_data` | POST | 刷新线上数据（管理令牌） |
 | `/api/status` | GET | 数据抓取状态 |
 | `/api/progress/<id>` | SSE | 预测进度推送 |
-| `/api/calibrate/run` | GET | 后台启动校准 |
+| `/api/calibrate/run` | POST | 后台启动校准（管理令牌） |
 | `/api/calibrate/status` | GET | 校准进度查询 |
 | `/api/calibrate/report` | GET | 校准报告 |
 | `/api/rankings` | GET | ELO 世界排名 |
 | `/api/wc_matches` | GET | 世界杯赛果 |
-| `/api/sync_fifa` | GET | 同步 FIFA 数据 |
+| `/api/sync_fifa` | POST | 同步 FIFA 数据（管理令牌） |
 | `/api/betting/analyze` | POST | 竞彩投注分析 |
 | `/api/betting/matches` | GET | 投注比赛列表 |
 | `/api/history/matches` | GET | 历史比赛（分页） |
 | `/api/history/h2h` | GET | 两队交锋记录 |
 | `/api/history/trend` | GET | 球队近期趋势 |
 | `/api/lottery` | GET | 彩票开奖数据 |
+| `/api/lottery` | POST | 强制刷新彩票开奖数据（管理令牌） |
 | `/api/lottery/predict/<key>` | GET | 彩票预测分析 |
+| `/api/lottery/predict/<key>` | POST | 重新生成彩票分析（管理令牌） |
 | `/history` | GET | 历史记录页面 |
 | `/betting` | GET | 竞彩投注页面 |
 | `/calibrate` | GET | 校准页面 |
 | `/lottery` | GET | 彩票页面 |
 
-`/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（模型可用数量）以及配置权重和本次实际权重。旧字段 `confidence` 和 `ensemble.weights` 暂时保留兼容，分别对应 `model_agreement` 和 `ensemble.effective_weights`。
+`/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（独立模型可用数量）、`simulation`（融合后的蒙特卡洛派生分布）以及配置权重和本次实际权重。旧字段 `confidence`、`ensemble.weights` 和 `predictions.monte_carlo` 暂时保留兼容。
 
 ## 技术栈
 

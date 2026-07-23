@@ -20,7 +20,7 @@ def test_load_migrates_legacy_knn_key(tmp_path):
     assert "knn" not in bma.get_weights()
     assert "knn_key_migrated" in bma.load_warnings
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 2
+    assert saved["schema_version"] == 3
     assert "knn" not in saved["weights"]
 
 
@@ -75,3 +75,31 @@ def test_corrupt_weights_fall_back_without_overwriting(tmp_path):
     assert bma.load() is False
     assert path.read_text(encoding="utf-8") == "{broken"
     assert "weights_file_invalid" in bma.load_warnings
+
+
+def test_load_disables_legacy_monte_carlo_weight(tmp_path):
+    path = tmp_path / "weights.json"
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "weights": {"poisson": 0.5, "monte_carlo": 0.5},
+    }), encoding="utf-8")
+    bma = BayesianModelAveraging(weights_file=path)
+
+    assert bma.load() is True
+    assert bma.get_weights()["monte_carlo"] == 0.0
+    assert "monte_carlo_weight_disabled" in bma.load_warnings
+
+
+def test_blend_excludes_derived_monte_carlo_even_if_weight_is_positive():
+    bma = BayesianModelAveraging()
+    bma.weights = {"poisson": 0.5, "monte_carlo": 0.5}
+
+    result = bma.blend({
+        "poisson": _prediction(0.5, 0.3, 0.2),
+        "monte_carlo": _prediction(0.7, 0.2, 0.1, role="derived"),
+    })
+
+    assert result["effective_weights"] == {"poisson": 1.0}
+    assert result["home_win"] == 0.5
+    assert result["excluded_models"][0]["model_id"] == "monte_carlo"
+    assert result["excluded_models"][0]["reason"] == "derived_output"

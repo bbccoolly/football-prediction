@@ -192,6 +192,7 @@
   </div>
 </div>
 
+<script src="/static/js/admin.js?v=2026072301"></script>
 <script>
 // ==================== 开奖结果 ====================
 var allData = null;
@@ -258,7 +259,10 @@ async function doPredict(key, force) {
   // 重新生成：静默获取 + 全量刷新（无loading闪烁）
   if (force && predCache[key]) {
     try {
-      var r = await fetch('/api/lottery/predict/' + key + '?regen=1');
+      var r = await window.adminApi.request('/api/lottery/predict/' + key, {
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({force_refresh: false})
+      });
       var d = await r.json();
       if (d.error) return;
       predCache[key] = d;
@@ -417,7 +421,7 @@ async function refreshAllData() {
   var panel = document.getElementById('resultPanel');
   panel.innerHTML = '<div class="loading-text">正在刷新数据...</div>';
   try {
-    var r = await fetch('/api/lottery?force=1');
+    var r = await window.adminApi.request('/api/lottery');
     allData = await r.json();
     // Re-render results
     var order = ['dlt','qxc','pls','plw'];

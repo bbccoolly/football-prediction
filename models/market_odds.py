@@ -23,6 +23,15 @@ class MarketOddsModel:
 
     def odds_to_probabilities(self, odds: dict) -> dict:
         """赔率转隐含概率（去除水头 overround）"""
+        if set(odds) != {"home", "draw", "away"}:
+            raise ValueError("odds must contain home, draw and away")
+        if any(
+            not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 1.0
+            for value in odds.values()
+        ):
+            raise ValueError("odds must be finite numbers greater than 1")
         # 倒数
         raw = {k: 1.0 / v for k, v in odds.items()}
         # 水头
@@ -36,11 +45,22 @@ class MarketOddsModel:
                 companies: str = "average") -> dict:
         """预测：可传入特赔率，或从存储中提取"""
 
-        # 如果传入了赔率，直接用
-        if home_odds and draw_odds and away_odds:
-            probs = self.odds_to_probabilities({
-                "home": home_odds, "draw": draw_odds, "away": away_odds
-            })
+        supplied_odds = (home_odds, draw_odds, away_odds)
+        if any(value is not None for value in supplied_odds):
+            try:
+                probs = self.odds_to_probabilities({
+                    "home": home_odds, "draw": draw_odds, "away": away_odds
+                })
+            except ValueError:
+                return {
+                    "model": "market_odds",
+                    "available": False,
+                    "status": "invalid_odds",
+                    "home_win": None,
+                    "draw": None,
+                    "away_win": None,
+                    "warnings": ["invalid_odds"],
+                }
             return {
                 "model": "market_odds",
                 "home_win": round(probs["home"], 4),
@@ -54,7 +74,10 @@ class MarketOddsModel:
             all_probs = {"home": [], "draw": [], "away": []}
             for company, matches in self.odds_data.items():
                 if match_id in matches:
-                    probs = self.odds_to_probabilities(matches[match_id])
+                    try:
+                        probs = self.odds_to_probabilities(matches[match_id])
+                    except ValueError:
+                        continue
                     for k in all_probs:
                         all_probs[k].append(probs[k])
 
@@ -68,13 +91,16 @@ class MarketOddsModel:
                     "source": f"{len(all_probs['home'])} companies avg",
                 }
 
-        # 无数据，返回先验
+        # 无真实赔率时退出融合，赛事比例基线由回测模块单独提供。
         return {
             "model": "market_odds",
-            "home_win": 0.45,
-            "draw": 0.28,
-            "away_win": 0.27,
-            "source": "prior (no data)",
+            "available": False,
+            "status": "no_market_odds",
+            "home_win": None,
+            "draw": None,
+            "away_win": None,
+            "source": None,
+            "warnings": ["market_odds_missing"],
         }
 
     @staticmethod

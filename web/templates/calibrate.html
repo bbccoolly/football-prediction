@@ -110,6 +110,7 @@
   </div>
 </div>
 
+<script src="/static/js/admin.js?v=2026072301"></script>
 <script>
 var accChart = null, weightChart = null;
 var pollTimer = null;
@@ -121,7 +122,7 @@ async function runCalibration() {
   document.getElementById('progressWrap').classList.add('active');
 
   try {
-    var r = await fetch('/api/calibrate/run');
+    var r = await window.adminApi.request('/api/calibrate/run');
     var d = await r.json();
     if (d.error) { 
       if (d.progress !== undefined) {
@@ -176,7 +177,7 @@ async function runCalibration() {
   document.getElementById('statusText').textContent = '读取报告...';
 
   try {
-    var r = await fetch('/api/calibrate/run');
+    var r = await window.adminApi.request('/api/calibrate/run');
     var d = await r.json();
     if (d.error) { 
       alert(d.error + ''); 

@@ -87,16 +87,21 @@ class MasseyRanking:
         prob_home_win -= prob_draw / 2
         prob_away_win -= prob_draw / 2
 
-        total = prob_home_win + prob_draw + prob_away_win
-        prob_home_win /= total
-        prob_draw /= total
-        prob_away_win /= total
+        probabilities = np.clip(
+            np.array([prob_home_win, prob_draw, prob_away_win], dtype=float),
+            0.01,
+            0.98,
+        )
+        probabilities /= probabilities.sum()
+        rounded_home = round(float(probabilities[0]), 4)
+        rounded_draw = round(float(probabilities[1]), 4)
+        rounded_away = round(1.0 - rounded_home - rounded_draw, 4)
 
         return {
             "model": "massey",
-            "home_win": round(max(0.01, prob_home_win), 4),
-            "draw": round(prob_draw, 4),
-            "away_win": round(max(0.01, prob_away_win), 4),
+            "home_win": rounded_home,
+            "draw": rounded_draw,
+            "away_win": rounded_away,
             "rating_home": r_home,
             "rating_away": r_away,
         }

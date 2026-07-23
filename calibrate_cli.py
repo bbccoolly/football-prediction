@@ -389,7 +389,7 @@ def show_report():
         else: color = Colors.RED
         nm = c(MODEL_NAMES.get(key,key), Colors.BOLD)
         ac = c(f"{acc:5.1f}%", color)
-        br = c(f"{r.get("brier",0):.4f}", Colors.DIM)
+        br = c(f"{r.get('brier', 0):.4f}", Colors.DIM)
         wt = c(f"{w*100:5.1f}%", Colors.CYAN)
         print(f"  {nm:<16} {ac:>7} {br:>8} {wt:>8}")
 
