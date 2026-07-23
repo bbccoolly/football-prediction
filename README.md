@@ -28,7 +28,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/2891593122/football-prediction.git
+git clone https://github.com/bbccoolly/football-prediction.git
 cd football-prediction
 
 # 安装依赖

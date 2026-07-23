@@ -8,6 +8,8 @@ server_out*.log
 .env
 .DS_Store
 Thumbs.db
+.idea/
+.workbuddy/
 
 # 运行时生成
 data/processed/
@@ -15,10 +17,6 @@ data/raw/
 data/lottery_cache/
 ensemble/weights.json
 ensemble/saved_models/
-
-# Claude/Agent 项目配置（仅本地）
-CLAUDE.md
-AGENTS.md
 
 # 备份文件
 .restore_backup_*/
