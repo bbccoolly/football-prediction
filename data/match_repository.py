@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from config import LEAGUES
+from config import LEAGUES, LEAGUE_NAMES_CN
 from data.migrations import SCHEMA_VERSION, apply_migrations
 from data.source_adapters import SourceRecord, adapt_source_payload
 
@@ -521,6 +521,83 @@ class MatchRepository:
             if self.database_path != ":memory:":
                 connection.close()
 
+    def resolve_team_unique(self, raw_name: str, team_type: str | None = None):
+        """Resolve an alias across all sources only when it maps to one team."""
+        connection = self._connection()
+        normalized = normalize_alias(raw_name)
+        clauses = ["a.normalized_alias=?"]
+        parameters: list[Any] = [normalized]
+        if team_type:
+            clauses.append("a.team_type=?")
+            parameters.append(team_type)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT t.*
+                FROM team_aliases a JOIN teams t ON t.team_id=a.team_id
+                WHERE {' AND '.join(clauses)}
+                """,
+                parameters,
+            ).fetchall()
+            unique = {row["team_id"]: dict(row) for row in rows}
+            return next(iter(unique.values())) if len(unique) == 1 else None
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def get_team(self, team_id: str):
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT * FROM teams WHERE team_id=?", (team_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def list_teams(self, team_type: str | None = None):
+        connection = self._connection()
+        try:
+            if team_type:
+                rows = connection.execute(
+                    "SELECT * FROM teams WHERE team_type=? ORDER BY canonical_name",
+                    (team_type,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM teams ORDER BY team_type, canonical_name"
+                ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def get_competition(self, competition_id: str):
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT * FROM competitions WHERE competition_id=?", (competition_id,)
+            ).fetchone()
+            if row:
+                return dict(row)
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+        canonical_name = LEAGUE_NAMES_CN.get(competition_id)
+        if canonical_name:
+            return {
+                "competition_id": competition_id,
+                "canonical_name": canonical_name,
+                "competition_type": _competition_type(canonical_name),
+            }
+        return None
+
+    def resolve_competition(self, value: str):
+        raw = str(value or "").strip()
+        competition_id = LEAGUES.get(raw, raw)
+        return self.get_competition(competition_id)
+
     @staticmethod
     def _record_unmatched(connection, source, raw_alias, team_type, now):
         connection.execute(
@@ -607,6 +684,9 @@ class MatchRepository:
         if filters.get("team_id"):
             clauses.append("(m.home_team_id=? OR m.away_team_id=?)")
             parameters.extend([filters["team_id"], filters["team_id"]])
+        if filters.get("team_type"):
+            clauses.append("ht.team_type=? AND at.team_type=?")
+            parameters.extend([filters["team_type"], filters["team_type"]])
         if as_of:
             cutoff_timestamp = normalize_timestamp(as_of)
             cutoff_date = cutoff_timestamp[:10]
@@ -620,6 +700,7 @@ class MatchRepository:
             rows = connection.execute(
                 f"""
                 SELECT m.*, ht.canonical_name AS home_team, at.canonical_name AS away_team,
+                       ht.team_type AS home_team_type, at.team_type AS away_team_type,
                        c.canonical_name AS league
                 FROM matches m
                 JOIN teams ht ON ht.team_id=m.home_team_id
@@ -735,8 +816,12 @@ class MatchRepository:
             if self.database_path != ":memory:":
                 connection.close()
 
-    def build_data_fingerprint(self, filters: Mapping[str, Any] | None = None):
-        matches = self.list_matches(filters)
+    def build_data_fingerprint(
+        self,
+        filters: Mapping[str, Any] | None = None,
+        as_of: str | None = None,
+    ):
+        matches = self.list_matches(filters, as_of=as_of)
         canonical = [
             {
                 key: match.get(key)

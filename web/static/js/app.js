@@ -13,7 +13,7 @@ var dataAvailable = false;
 // Init
 // ======================================================================
 async function init() {
-    // 立即填充下拉框
+    // 预填充候选项；只有输入框获得焦点时才显示。
     filterTeams("home");
     filterTeams("away");
     try {
@@ -79,14 +79,15 @@ function filterTeams(side) {
             display = t.replace(regex, "<mark>$1</mark>");
         }
         var cls = t === sel ? "dropdown-item selected" : "dropdown-item";
-        html += "<div class='" + cls + "' onclick=\"selectTeam('" + side + "','" + escHtml(t) + "')\">"
+        html += "<div class='" + cls + "' data-side='" + side
+             + "' data-team='" + escHtml(t) + "'>"
              + display + "</div>";
     }
     if (show.length === 0) {
         html = "<div class='dropdown-item muted'>无匹配</div>";
     }
     dropdown.innerHTML = html;
-    dropdown.style.display = "block";
+    dropdown.style.display = document.activeElement === input ? "block" : "none";
 
 }
 

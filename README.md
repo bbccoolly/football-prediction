@@ -7,7 +7,7 @@
 | 功能 | 说明 |
 |------|------|
 | 🎯 11 个独立候选模型 | 泊松 / Dixon-Coles / ELO / Massey / 近期状态 / 交锋记录 / 市场赔率 / KNN / XGBoost / 神经网络 / 贝叶斯层次；蒙特卡洛作为融合后的派生模拟 |
-| 📊 动态融合 | 基于 Brier Score 的启发式动态权重，并按本次有效模型重新归一化 |
+| 📊 受控融合 | PR 3 使用代码内置可信权重，并按本次有效模型重新归一化；旧校准权重不进入活动快照 |
 | 🎰 让球胜负 | ±1 / ±1.5 / ±2 共 7 个盘口的概率计算 |
 | 📈 半全场 | 半场/全场组合概率分布 |
 | 🏟️ 场地因素 | 自动识别世界杯等中立场地，主场优势分联赛配置 |
@@ -50,7 +50,7 @@ python run.py
 
 浏览器打开 **http://127.0.0.1:5000**
 
-刷新数据、FIFA 同步、校准和彩票强制刷新需要管理令牌：
+刷新数据、FIFA 同步和彩票强制刷新需要管理令牌；校准入口在可信回测完成前保持禁用：
 
 ```powershell
 $env:FOOTBALL_ADMIN_TOKEN = "your-secret-token"
@@ -59,7 +59,7 @@ python run.py
 
 默认只监听 `127.0.0.1:5000`。可通过 `FOOTBALL_HOST` 和 `FOOTBALL_PORT` 修改；监听非回环地址时必须配置管理令牌。
 
-历史比赛读取不会隐式联网或创建数据库：存在 SQLite 标准库时优先读取，否则只读回退旧 JSON。待开赛列表仍会按现有缓存策略访问 500.com 或竞彩网；数据同步必须通过受管理令牌保护的显式接口执行。
+历史比赛读取不会隐式联网或创建数据库：存在 SQLite 标准库时优先读取，否则只读回退旧 JSON。启动时只读加载本地待开赛缓存，即使缓存过期也不会自动抓取；线上刷新和数据同步只能通过受管理令牌保护的显式接口执行。
 
 ### 历史数据迁移
 
@@ -119,7 +119,7 @@ football-prediction/
 │   └── bayesian_hierarchical.py  #   贝叶斯层次模型
 │
 ├── ensemble/                     # 融合层
-│   ├── bma.py                    #   基于 Brier Score 的启发式动态融合
+│   ├── bma.py                    #   融合实现（运行时使用内置可信权重）
 │   ├── prediction_contract.py    #   模型可用性与概率协议
 │   └── stacker.py                #   Stacking 元学习器
 │
@@ -136,6 +136,12 @@ football-prediction/
 │   ├── reference/                #   受版本控制的球队别名种子
 │   └── venue_db.py               #   场地数据库
 │
+├── prediction/                   # 共享预测运行时
+│   ├── contracts.py              #   请求、快照、结果和稳定异常契约
+│   ├── artifacts.py              #   只读模型产物门禁
+│   ├── runtime.py                #   分域模型快照与原子刷新
+│   └── service.py                #   Web / CLI 共用预测入口
+│
 ├── betting/                      # 竞彩投注
 │   ├── jczq_engine.py            #   投注分析引擎
 │   ├── jczq_planner.py           #   投注方案规划
@@ -143,8 +149,8 @@ football-prediction/
 │   └── jczq_team_db.py           #   球队数据
 │
 ├── config.py                     # 全局配置（15 联赛 · 128 球队 · 算法参数）
-├── calibrate.py                  # 回测校准主程序
-├── calibrate_cli.py              # 命令行校准工具
+├── calibrate.py                  # 旧校准实现（不作为可信准入依据）
+├── calibrate_cli.py              # 旧校准工具（等待 PR 4 替换）
 ├── lottery_predictor.py          # 彩票预测（大乐透/排三/排五/七星彩）
 ├── lottery_fetcher.py            # 彩票数据抓取
 ├── main.py                       # CLI 主入口
@@ -158,26 +164,17 @@ football-prediction/
 └── .gitignore
 ```
 
-## 算法校准
+## 模型校准
 
 项目的分阶段优化、测试门禁和模型准入规范见 [优化路线图](docs/optimization-roadmap.md)。
 
-```bash
-# 完整校准（抓取数据 → 回测 → 更新权重）
-python calibrate.py
+PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1` 和权重指纹。旧 `ensemble/weights.json`、旧校准报告及旧 pickle 产物不会被运行时加载。
 
-# 查看上次校准报告
-python calibrate_cli.py --report
+在 PR 4 完成严格 Walk-forward、保留集评估和模型准入前：
 
-# 快速模式
-python calibrate_cli.py --quick
-```
-
-校准流程：
-1. 从 OpenLigaDB（德甲/德乙/德丙 2022-2024）和 500.com 抓取历史比赛
-2. 用前 20% 数据初始化模型，后 80% 逐场滚动回测
-3. 计算每个模型的 Brier Score 和 Log Loss
-4. 根据回测结果重新分配融合权重
+- `POST /api/calibrate/run` 返回 `503 CALIBRATION_DISABLED_PENDING_BACKTEST`。
+- `GET /api/calibration` 和旧校准状态接口只返回不可用状态。
+- 不应将 `calibrate.py` 或 `calibrate_cli.py` 的旧结果用于生产权重或模型准入。
 
 ## 数据来源
 
@@ -199,11 +196,12 @@ python calibrate_cli.py --quick
 | `/api/search_matches` | GET | 搜索比赛/交锋/近期 |
 | `/api/upcoming` | GET | 待开赛比赛列表 |
 | `/api/refresh_data` | POST | 刷新线上数据（管理令牌） |
-| `/api/status` | GET | 数据抓取状态 |
+| `/api/status` | GET | 数据、活动快照、模型状态和刷新状态 |
 | `/api/progress/<id>` | SSE | 预测进度推送 |
-| `/api/calibrate/run` | POST | 后台启动校准（管理令牌） |
-| `/api/calibrate/status` | GET | 校准进度查询 |
-| `/api/calibrate/report` | GET | 校准报告 |
+| `/api/calibration` | GET | 校准不可用状态（等待 PR 4） |
+| `/api/calibrate/run` | POST | 暂时返回 503（管理令牌） |
+| `/api/calibrate/status` | GET | 校准不可用状态 |
+| `/api/calibrate/report` | GET | 暂无可信校准报告 |
 | `/api/rankings` | GET | ELO 世界排名 |
 | `/api/wc_matches` | GET | 世界杯赛果 |
 | `/api/sync_fifa` | POST | 同步 FIFA 数据（管理令牌） |
@@ -221,7 +219,7 @@ python calibrate_cli.py --quick
 | `/calibrate` | GET | 校准页面 |
 | `/lottery` | GET | 彩票页面 |
 
-`/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（独立模型可用数量）、`simulation`（融合后的蒙特卡洛派生分布）以及配置权重和本次实际权重。旧字段 `confidence`、`ensemble.weights` 和 `predictions.monte_carlo` 暂时保留兼容。
+`/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（独立模型可用数量）、`simulation`（融合后的蒙特卡洛派生分布）、证据排除原因和训练数据质量；同时返回 `prediction_run_id`、运行时快照 ID、数据/配置/权重指纹、特征版本及模型训练元数据。旧字段 `confidence`、`ensemble.weights` 和 `predictions.monte_carlo` 暂时保留兼容。
 
 ## 技术栈
 

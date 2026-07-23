@@ -211,5 +211,5 @@ class BayesianModelAveraging:
         sanitized["monte_carlo"] = 0.0
         self.weights = sanitized
         if needs_save:
-            self.save()
+            self.load_warnings.append("weights_migration_required")
         return True

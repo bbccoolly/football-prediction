@@ -49,11 +49,11 @@ class FormModel:
     def get_form_score(self, team: str) -> dict:
         """计算球队近期状态得分"""
         if team not in self.team_history:
-            return {"ppg": 1.0, "goal_diff_avg": 0.0, "form_score": 0.5, "matches_used": 0}
+            return {"ppg": 1.0 / 3.0, "goal_diff_avg": 0.0, "form_score": 0.5, "matches_used": 0}
 
         recent = self.team_history[team][-self.num_matches:]
         if not recent:
-            return {"ppg": 1.0, "goal_diff_avg": 0.0, "form_score": 0.5, "matches_used": 0}
+            return {"ppg": 1.0 / 3.0, "goal_diff_avg": 0.0, "form_score": 0.5, "matches_used": 0}
 
         n = len(recent)
         total_points = 0

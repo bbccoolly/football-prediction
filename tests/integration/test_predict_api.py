@@ -236,3 +236,115 @@ def test_fifa_sync_imports_through_repository(client, monkeypatch, tmp_path):
     assert body["inserted"] == 1
     assert body["total_history"] == 1
     assert MatchRepository(database).list_matches()[0]["home_team"] == "法国"
+
+
+def test_fifa_sync_conflict_returns_409_without_writing(client, monkeypatch):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    writes = []
+
+    class RepositoryStub:
+        def get_data_quality_report(self):
+            return {}
+
+        def create_sync_run(self, *_args, **_kwargs):
+            writes.append("sync-run")
+            return "sync-run"
+
+        def import_source_records(self, *_args, **_kwargs):
+            writes.append("import")
+            return {}
+
+    class RuntimeManagerStub:
+        def run_update(self, _operation, _reason):
+            from prediction import RuntimeRefreshInProgressError
+            raise RuntimeRefreshInProgressError("已有运行时刷新任务正在执行")
+
+    monkeypatch.setattr(web_app, "_ensure_runtime_components", lambda: None)
+    monkeypatch.setattr(web_app, "_repository", RepositoryStub())
+    monkeypatch.setattr(web_app, "_runtime_manager", RuntimeManagerStub())
+    monkeypatch.setattr(
+        "data.fifa_sync.fetch_recent_fifa_source_records",
+        lambda days=14: {"records": [object()], "fetched": 1, "errors": []},
+    )
+
+    response = client.post(
+        "/api/sync_fifa",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error_code"] == "RUNTIME_REFRESH_IN_PROGRESS"
+    assert writes == []
+
+
+def test_real_prediction_exposes_runtime_metadata(monkeypatch, tmp_path):
+    database = tmp_path / "football.db"
+    repository = MatchRepository(database)
+    repository.initialize()
+    from data.source_adapters import adapt_legacy_match
+    records = [
+        adapt_legacy_match({
+            "home_team": "拜仁" if index % 2 == 0 else "多特蒙德",
+            "away_team": "多特蒙德" if index % 2 == 0 else "拜仁",
+            "home_goals": 2,
+            "away_goals": 1,
+            "league": "德甲",
+            "date": f"2026-06-{index + 1:02d}",
+        }, source="manual")
+        for index in range(8)
+    ]
+    run_id = repository.create_sync_run("test")
+    repository.import_source_records(records, run_id, sync_type="test")
+    monkeypatch.setenv("FOOTBALL_DB_PATH", str(database))
+    for name, value in (
+        ("_initialized", False), ("_runtime_database_path", None),
+        ("_repository", None), ("_runtime_manager", None),
+        ("_prediction_service", None),
+    ):
+        monkeypatch.setattr(web_app, name, value)
+    test_client = web_app.app.test_client()
+
+    response = test_client.post(
+        "/predict",
+        json={"home_team": "拜仁", "away_team": "多特蒙德", "league": "德甲"},
+    )
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["runtime_snapshot_id"].startswith("runtime-")
+    assert body["feature_version"] == "2"
+    assert body["runtime"]["weights_source"] == "builtin_v1"
+    assert body["predictions"]["xgboost"]["available"] is False
+    assert "confidence" in body
+    assert web_app.app.extensions["match_repository"] is web_app._repository
+    assert web_app.app.extensions["runtime_manager"] is web_app._runtime_manager
+    assert web_app.app.extensions["prediction_service"] is web_app._prediction_service
+
+    monkeypatch.setattr(
+        web_app, "load_history",
+        lambda: (_ for _ in ()).throw(AssertionError("不应读取兼容历史层")),
+    )
+    h2h = test_client.get(
+        "/api/history/h2h?a=拜仁&b=多特蒙德"
+    ).get_json()
+    assert h2h["count"] == 8
+
+    upcoming = web_app._normalize_upcoming([{
+        "home_team": "拜仁", "away_team": "多特蒙德",
+        "league": "德甲", "source": "manual",
+    }])[0]
+    assert upcoming["predictable"] is True
+    assert upcoming["home_team_id"]
+    assert upcoming["competition_id"] == "bundesliga"
+
+
+def test_calibration_run_is_disabled(client, monkeypatch):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+
+    response = client.post(
+        "/api/calibrate/run",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error_code"] == "CALIBRATION_DISABLED_PENDING_BACKTEST"

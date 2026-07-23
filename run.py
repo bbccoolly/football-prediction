@@ -38,11 +38,8 @@ def main():
 
     host, port = server_config()
     print("Initializing models...")
-    try:
-        _init_models()
-        print("Models ready.")
-    except Exception as exc:
-        print(f"Init warning: {exc}")
+    _init_models()
+    print("Models ready.")
 
     print(f"Starting on http://{host}:{port}")
     app.run(debug=False, host=host, port=port)

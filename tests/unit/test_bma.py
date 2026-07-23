@@ -10,7 +10,7 @@ def _prediction(home, draw, away, **extra):
     return {"home_win": home, "draw": draw, "away_win": away, **extra}
 
 
-def test_load_migrates_legacy_knn_key(tmp_path):
+def test_load_migrates_legacy_knn_key_without_writing(tmp_path):
     path = tmp_path / "weights.json"
     path.write_text(json.dumps({"weights": {"poisson": 0.6, "knn": 0.4}}), encoding="utf-8")
     bma = BayesianModelAveraging(weights_file=path)
@@ -20,8 +20,8 @@ def test_load_migrates_legacy_knn_key(tmp_path):
     assert "knn" not in bma.get_weights()
     assert "knn_key_migrated" in bma.load_warnings
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 3
-    assert "knn" not in saved["weights"]
+    assert saved == {"weights": {"poisson": 0.6, "knn": 0.4}}
+    assert "weights_migration_required" in bma.load_warnings
 
 
 def test_new_knn_key_wins_when_both_exist(tmp_path):
