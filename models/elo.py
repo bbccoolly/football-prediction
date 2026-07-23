@@ -1,18 +1,109 @@
 # models/elo.py - ELO 动态评级系统
 
-import math
+import hashlib
 import json
+import math
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from config import ELO_INITIAL, ELO_K, ELO_HOME_BONUS, ELO_SCALE, PROCESSED_DIR
 
 
 class EloRating:
     """ELO 动态评级：根据比赛结果更新球队分值，预测胜平负概率"""
 
-    def __init__(self):
+    SCHEMA_VERSION = 2
+
+    def __init__(self, storage_path=None):
         self.ratings = {}          # {team_name: elo_score}
         self.history = []          # [{team, elo_before, elo_after, match_id}]
-        self.elos_file = os.path.join(PROCESSED_DIR, "elo_ratings.json")
+        self.elos_file = str(storage_path or os.path.join(PROCESSED_DIR, "elo_ratings.json"))
+        self.data_fingerprint = None
+        self.parameter_fingerprint = self._parameter_fingerprint()
+        self.match_count = 0
+        self.built_at = None
+
+    @staticmethod
+    def _parameter_fingerprint():
+        params = {
+            "initial": ELO_INITIAL,
+            "k": ELO_K,
+            "home_bonus": ELO_HOME_BONUS,
+            "scale": ELO_SCALE,
+        }
+        payload = json.dumps(params, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _normalize_datetime(value):
+        if not value:
+            return ""
+        raw = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            return f"raw:{raw}"
+
+    @classmethod
+    def _canonical_matches(cls, matches):
+        canonical = []
+        for match in matches:
+            canonical.append({
+                "date_time": cls._normalize_datetime(
+                    match.get("date_time") or match.get("date")
+                ),
+                "match_id": str(match.get("match_id") or ""),
+                "league": str(match.get("league") or ""),
+                "home_team": str(match.get("home_team") or ""),
+                "away_team": str(match.get("away_team") or ""),
+                "home_goals": int(match.get("home_goals", 0)),
+                "away_goals": int(match.get("away_goals", 0)),
+                "neutral": bool(match.get("neutral", False)),
+                "importance": float(match.get("importance", 1.0)),
+            })
+        canonical.sort(key=lambda item: (
+            item["date_time"], item["match_id"], item["league"],
+            item["home_team"], item["away_team"],
+            item["home_goals"], item["away_goals"],
+            item["neutral"], item["importance"],
+        ))
+        return canonical
+
+    @classmethod
+    def fingerprint_matches(cls, matches):
+        payload = json.dumps(
+            cls._canonical_matches(matches),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def reset(self):
+        self.ratings = {}
+        self.history = []
+        self.data_fingerprint = None
+        self.parameter_fingerprint = self._parameter_fingerprint()
+        self.match_count = 0
+        self.built_at = None
+
+    def rebuild(self, matches):
+        canonical = self._canonical_matches(matches)
+        self.reset()
+        for match in canonical:
+            self.update(
+                match["home_team"], match["away_team"],
+                match["home_goals"], match["away_goals"],
+                match["neutral"], match["importance"],
+                match_id=match["match_id"],
+            )
+        self.data_fingerprint = self.fingerprint_matches(matches)
+        self.match_count = len(canonical)
+        self.built_at = datetime.now(timezone.utc).isoformat()
+        return self
 
     def get_rating(self, team: str) -> float:
         return self.ratings.get(team, ELO_INITIAL)
@@ -51,7 +142,8 @@ class EloRating:
 
     def update(self, home_team: str, away_team: str,
                home_goals: int, away_goals: int,
-               neutral: bool = False, importance: float = 1.0):
+               neutral: bool = False, importance: float = 1.0,
+               match_id: str = ""):
         """赛后更新 ELO 分"""
         elo_home = self.get_rating(home_team) + (0 if neutral else ELO_HOME_BONUS)
         elo_away = self.get_rating(away_team)
@@ -80,6 +172,7 @@ class EloRating:
         self.ratings[away_team] = new_away
 
         self.history.append({
+            "match_id": match_id,
             "home_team": home_team,
             "away_team": away_team,
             "elo_home_before": elo_home,
@@ -99,16 +192,58 @@ class EloRating:
             )
 
     def save(self):
-        os.makedirs(os.path.dirname(self.elos_file), exist_ok=True)
-        with open(self.elos_file, "w", encoding="utf-8") as f:
-            json.dump({"ratings": self.ratings, "history": self.history[-500:]}, f, ensure_ascii=False, indent=2)
+        path = Path(self.elos_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        data = {
+            "schema_version": self.SCHEMA_VERSION,
+            "ratings": self.ratings,
+            "history": self.history[-500:],
+            "data_fingerprint": self.data_fingerprint,
+            "parameter_fingerprint": self._parameter_fingerprint(),
+            "match_count": self.match_count,
+            "built_at": self.built_at,
+        }
+        try:
+            with temp_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
-    def load(self):
-        if os.path.exists(self.elos_file):
-            with open(self.elos_file, "r", encoding="utf-8") as f:
+    def load(self, expected_fingerprint=None):
+        self.reset()
+        path = Path(self.elos_file)
+        if not path.exists():
+            return False
+        try:
+            with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-                self.ratings = data.get("ratings", {})
-                self.history = data.get("history", [])
+        except (OSError, json.JSONDecodeError, TypeError):
+            return False
+
+        current_parameter_fingerprint = self._parameter_fingerprint()
+        if data.get("schema_version") != self.SCHEMA_VERSION:
+            return False
+        if data.get("parameter_fingerprint") != current_parameter_fingerprint:
+            return False
+        if expected_fingerprint is not None and data.get("data_fingerprint") != expected_fingerprint:
+            return False
+        ratings = data.get("ratings")
+        history = data.get("history")
+        if not isinstance(ratings, dict) or not isinstance(history, list):
+            return False
+
+        self.ratings = ratings
+        self.history = history
+        self.data_fingerprint = data.get("data_fingerprint")
+        self.parameter_fingerprint = current_parameter_fingerprint
+        self.match_count = int(data.get("match_count", len(history)))
+        self.built_at = data.get("built_at")
+        return True
 
     def get_league_rankings(self) -> list:
         """返回 ELO 排名"""
