@@ -56,3 +56,4 @@
 
 - `docs/optimization-roadmap.md`：后续阶段、模型准入和完成定义。
 - `docs/iteration-a-implementation-plan.md`：预测正确性基座的接口、迁移和验收细节。
+- `docs/iteration-b-implementation-plan.md`：数据治理、共享预测服务、可信回测和准入细节。

@@ -1,6 +1,6 @@
 # 迭代 B：预测收口、数据治理与可信回测实施方案
 
-> 实施状态：PR 1 已于 2026-07-23 完成实现和本地验证，等待代码审查与提交；PR 2 尚未开始。本文档是迭代 B 的决策完整方案，实施时按连续、可独立审查的 PR 交付。
+> 实施状态：PR 1 已于 2026-07-23 在 `codex/prediction-hardening` 完成实现、本地验证和提交（`fdb535d`）；PR 2 尚未开始。本文档是迭代 B 的决策完整方案，实施时按连续、可独立审查的 PR 交付。
 
 ## 1. 实施目标
 
@@ -16,7 +16,7 @@
 
 ## 2. 交付策略
 
-从当前迭代 A 完成提交创建连续、可独立审查的分支，不在一个 PR 中混合全部重构：
+PR 1 已从迭代 A 完成提交开始实施；剩余 PR 从前一个已验证提交创建连续分支，不在一个 PR 中混合全部重构：
 
 | PR | 分支 | 交付目标 |
 |---|---|---|
@@ -25,7 +25,7 @@
 | PR 3 | `codex/prediction-service` | 共享预测服务、运行时快照和原子刷新 |
 | PR 4 | `codex/walk-forward-backtest` | 严格回测、指标报告和研究级准入清单 |
 
-每个 PR 从前一个已验证提交继续，独立运行测试并使用中文提交说明。运行时数据库、历史数据、报告、权重和模型产物不得提交。
+三个剩余 PR 是串行依赖关系，必须按 PR 2、PR 3、PR 4 的顺序审查和合并。每个 PR 独立运行测试并使用中文提交说明。运行时数据库、历史数据、报告、权重和模型产物不得提交。
 
 ## 3. PR 1：预测与接口收口
 
@@ -203,8 +203,10 @@ ci: 增加 Python 编译与离线测试门禁
 
 - 来源和源站记录 ID
 - 原始载荷 JSON 及载荷指纹
+- 可空身份指纹和来源修订时间
 - 抓取时间
 - 解析状态和错误摘要
+- 唯一键 `(source, source_record_id, payload_fingerprint)`；无来源 ID 时使用 `(source, identity_fingerprint, payload_fingerprint)` 保证重复同步幂等
 
 #### `match_sources`
 
@@ -243,7 +245,10 @@ ci: 增加 Python 编译与离线测试门禁
 - 时间或比分变化更新内容，不创建新比赛。
 - 无源 ID 且发生改期时进入 `duplicate_candidates`，不自动合并。
 - 同一天、同赛事、同球队的疑似重复记录进入审核队列。
-- 原始来源记录只追加和审计，不覆盖历史载荷。
+- 原始来源记录按修订只追加和审计，不覆盖历史载荷。
+- 完全相同的载荷重复导入不追加来源修订，计入 `skipped`。
+- 同一可靠来源 ID 出现新载荷时追加来源修订，并更新已关联比赛的时间、状态或比分。
+- `import_source_records()` 返回 `inserted`、`updated`、`skipped`、`rejected` 和 `unmatched` 计数，写入对应 `sync_runs`。
 
 ### 4.3 时间精度与防泄漏规则
 
@@ -267,7 +272,38 @@ ci: 增加 Python 编译与离线测试门禁
 - 未匹配来源记录保存在 `source_records` 和未匹配队列中，但不创建 `matches` 训练记录。
 - 新别名经人工加入种子文件后，可运行重解析命令。
 
-### 4.5 Repository 接口
+### 4.5 来源适配与统一写入口
+
+OpenLigaDB、500.com 和 FIFA 各自实现来源适配器，统一输出 `SourceRecord`：
+
+```text
+source
+source_record_id
+fetched_at
+raw_payload
+competition
+season
+stage
+event_date
+kickoff_utc
+source_timezone
+time_precision
+home_team_raw
+away_team_raw
+team_type
+neutral
+status
+home_goals
+away_goals
+```
+
+- 适配器只负责解析和保留原始值，不直接写数据库、不创建球队、不更新模型。
+- OpenLigaDB 使用源站比赛 ID；FIFA 使用官方比赛 ID；500.com 在缺少可靠 ID 时生成身份指纹。
+- 抓取成功但没有比赛、请求失败、解析失败和部分记录拒绝必须分别记录。
+- 历史刷新、FIFA 同步和 JSON 迁移只能调用 `import_source_records()`，禁止路由继续直接调用 `add_match()`。
+- 数据库尚未初始化时，写接口返回稳定配置错误，不得隐式创建数据库或回退写 JSON。
+
+### 4.6 Repository 接口
 
 实现 `MatchRepository`：
 
@@ -283,9 +319,9 @@ get_pre_match_odds(match_id, before)
 build_data_fingerprint(filters)
 ```
 
-所有批量导入使用单一事务；关键记录失败时整批回滚。
+所有批量导入使用单一事务；关键记录失败时整批回滚。Repository 查询和导入使用显式初始化入口；数据库文件存在但 `user_version` 不受支持、Schema 缺失或损坏时立即报错，不得静默回退 JSON。
 
-### 4.6 JSON 迁移
+### 4.7 JSON 迁移
 
 提供：
 
@@ -309,6 +345,21 @@ python scripts/migrate_history.py --source PATH --database PATH --apply
 - 所有新增写入只进入 SQLite。
 - 应用读取历史数据不得自动联网或隐式创建数据库。
 - 删除 JSON 回退属于后续独立迁移，不以“稳定一段时间”等模糊条件自动执行。
+
+`history_db.load_history()` 在兼容期返回以下固定结构，避免 PR 2 提前破坏现有模型：
+
+```text
+match_id
+home_team_id / away_team_id
+home_team / away_team
+competition_id / league
+event_date / date
+kickoff_utc / time_precision
+neutral / status
+home_goals / away_goals
+```
+
+其中 `home_team`、`away_team` 和 `league` 返回规范中文展示名；PR 3 内部预测再切换到稳定 ID。兼容适配器只读，不得承载新增写入。
 
 推荐提交顺序：
 
@@ -396,10 +447,10 @@ ModelRuntimeBuilder
 - 特征名称、顺序和版本固定。
 - 所有数据查询带 `as_of`，禁止读取预测时点之后的数据。
 - 缺失值、中立场、球队未知和赔率处理只有一套规则。
-- 单模型失败只排除对应模型。
+- 单模型出现已定义的不可用状态时只排除对应模型；未捕获异常或非法模型状态按快照构建失败处理。
 - 无可用模型统一抛出 `NoAvailableModelsError`。
 
-兼容字段保留一个迭代：
+兼容字段在迭代 B 内不得删除，并标记为 deprecated：
 
 - `confidence`
 - `ensemble.weights`
@@ -414,11 +465,16 @@ ModelRuntimeBuilder
 - `runtime_snapshot_id`
 - 模型训练范围和样本量
 
+兼容字段只允许在后续主 API 版本的独立 PR 中删除；删除前必须更新页面调用、README 和契约测试。
+
 ### 5.4 原子构建与刷新
 
 - 应用启动只从 Repository 和合法产物构建快照，不自动抓取或训练。
 - `ModelRuntimeBuilder` 在局部对象中完整构建所有历史依赖模型。
-- 构建成功后在锁内一次替换活动快照。
+- Repository 查询、数据指纹或共享特征构建失败时，整个快照构建失败。
+- 单模型因样本不足、不适用或产物缺失而不可用时，快照记录明确的 `unavailable` 状态并允许继续构建。
+- 单模型出现未捕获异常、非法概率或不一致状态时，整个快照构建失败。
+- 新快照至少包含一个通过公共协议校验的独立基础模型；满足条件后才在锁内一次替换活动快照。
 - 构建失败继续使用旧快照，并记录结构化错误。
 - 同一时刻只允许一个刷新任务构建快照。
 - FIFA 或历史同步流程：
@@ -427,6 +483,7 @@ ModelRuntimeBuilder
   3. 构建成功后原子替换。
   4. 构建失败时数据库保留新数据，但服务继续使用旧快照，并标记 `runtime_stale=true`。
 - API 状态接口展示数据库指纹、快照指纹和是否滞后。
+- `/api/status` 同时返回快照构建时间、训练截止时间、各模型状态和最近一次刷新错误摘要，不返回内部堆栈。
 
 推荐提交顺序：
 
@@ -456,6 +513,7 @@ fix: 原子刷新全部历史依赖模型
 - 验证集用于模型选择，不计入最终准入样本。
 - 准入结论只依据冻结保留集。
 - 数据不足仍可生成报告，但状态只能是 `insufficient_data` 或 `research_only`。
+- 当前历史数据规模预计低于正式准入门槛，因此 PR 4 的完成标准是生成可信、可复现的研究报告，不预设会有模型获得 `admitted`。
 
 ### 6.2 Walk-forward 流程
 
@@ -493,18 +551,25 @@ XGBoost、神经网络和 Stacking 在没有合规时间点产物时标记 `not_
 
 ### 6.4 指标与不确定性
 
-计算：
+指标使用固定定义：
 
-- Multiclass Brier Score
-- Log Loss
-- Ranked Probability Score
-- 10 桶 top-label ECE
+- Multiclass Brier Score：`sum((p_k - y_k)^2)`，不除以类别数，范围 `[0, 2]`。
+- Log Loss：`-log(clip(p_actual, 1e-15, 1))`。
+- Ranked Probability Score：类别顺序固定为主胜、平局、客胜，计算前两个累计类别误差平方和并除以 `K-1`。
+- 10 桶 top-label ECE：按最大预测概率分入 `[0, 0.1)` 至 `[0.9, 1.0]`，按桶样本占比加权准确率与平均置信度的绝对差。
 - 命中率，仅辅助展示
 - 按赛事、赛季、中立场、球队类型和数据覆盖等级分组指标
 
+样本对齐规则：
+
+- 模型与基线比较只使用双方均产生合法概率的样本交集。
+- 每个模型同时报告 `eligible_samples`、`valid_predictions` 和覆盖率。
+- 市场赔率仅使用 `captured_at` 不晚于预测时点且严格早于开赛时间的快照。
+- 不同模型不得使用各自不一致的样本集合后直接比较汇总指标。
+
 不确定性：
 
-- 按赛事和连续 7 天组成重采样块。
+- 按赛事和连续 7 天组成重采样块，在同一配对样本上重采样。
 - Bootstrap 2000 次，随机种子 42。
 - 输出均值、95% 区间和相对基线差值。
 
@@ -517,6 +582,7 @@ XGBoost、神经网络和 Stacking 在没有合规时间点产物时标记 `not_
 - Log Loss 配对 bootstrap 差值的 95% 上界不大于 0。
 - RPS 和 Brier 均不差于基线。
 - ECE 不得比基线高 `0.02` 以上。
+- 有效预测覆盖率不得低于符合数据门禁样本的 95%。
 - 特征、产物和训练时间验证全部通过。
 
 单赛事准入额外要求：
@@ -541,32 +607,43 @@ XGBoost、神经网络和 Stacking 在没有合规时间点产物时标记 `not_
 ```powershell
 python calibrate_cli.py backtest --database PATH
 python calibrate_cli.py backtest --fixture PATH
+python calibrate_cli.py backtest --fixture PATH --allow-insufficient-data
 python calibrate_cli.py report --run-id ID
 python calibrate_cli.py admission --run-id ID
 ```
 
 执行规则：
 
-- 默认离线。
-- 只有显式 `--allow-network` 才能同步数据。
+- 回测命令始终离线，只读取显式数据库或仓库内 fixture；联网同步只能通过独立的受保护数据同步入口执行。
 - `calibrate.py` 保留为兼容入口，只打印弃用说明并转发新 CLI。
 - 成功返回 0。
 - 配置或数据非法返回 1。
 - 数据不足、仅能生成研究报告时返回 2。
 - `--fixture` 只能使用仓库内固定测试数据，不写线上权重。
+- `--allow-insufficient-data` 只允许与 `--fixture` 同时使用：成功生成 `insufficient_data` 研究报告时返回 0；与 `--database` 同时使用属于配置错误并返回 1。
 
 输出到被忽略的目录：
 
 ```text
 data/processed/backtests/<run_id>/
   manifest.json
+  status.json
   predictions.jsonl
   metrics.json
   report.md
   admission.json
 ```
 
-`manifest.json` 必须记录 Git 提交、数据库指纹、数据范围、特征版本、参数版本、随机种子和运行时间。
+`manifest.json` 必须记录 Git 提交、数据库指纹、数据范围、特征版本、参数版本、随机种子和运行时间。`status.json` 记录 PID、`queued|running|completed|failed|interrupted` 状态、开始与结束时间、退出码和错误摘要，并使用临时文件加 `os.replace()` 原子更新。
+
+### 6.7 Web 校准任务迁移
+
+- `POST /api/calibrate/run` 启动 `calibrate_cli.py backtest --database <configured-path>`，不再直接运行旧 `calibrate.py`。
+- 接口在启动前生成 `run_id`，成功返回 `{"status":"started","run_id":"..."}`。
+- `GET /api/calibrate/status?run_id=<id>` 和 `GET /api/calibrate/report?run_id=<id>` 查询指定运行；兼容无参数调用时读取最近一次运行。
+- 同一时刻只允许一个回测任务运行；重复启动返回 409 和当前 `run_id`。
+- 服务启动时扫描未结束的 `status.json`：进程仍存在则恢复查询，进程不存在则原子标记为 `interrupted`。
+- 子进程参数使用列表传递，不经 shell；API 只返回稳定错误码和中文摘要，内部堆栈写服务端日志。
 
 推荐提交顺序：
 
@@ -587,6 +664,8 @@ refactor: 统一校准命令行入口
 - 球队别名来源隔离、类型隔离和未匹配重处理测试。
 - JSON dry-run 不创建数据库测试。
 - SQLite 正式迁移、重复迁移和事务回滚测试。
+- OpenLigaDB、500.com 和 FIFA 适配器解析、空结果与失败状态测试。
+- 相同来源载荷跳过、来源新修订更新和导入统计测试。
 - 日期级和分钟级 Walk-forward 无未来数据测试。
 - 未来模型产物拒绝加载测试。
 - Web、CLI、调试和回测同快照结果一致测试。
@@ -594,6 +673,8 @@ refactor: 统一校准命令行入口
 - 管理令牌、POST 方法和非回环启动测试。
 - 相同数据、参数和种子重复回测结果一致测试。
 - 数据不足不生成 `admitted` 状态测试。
+- 模型覆盖率不足 95% 不生成 `admitted` 状态测试。
+- Web 校准 run ID、任务互斥、状态恢复和中断识别测试。
 
 ### 7.2 最终门禁
 
@@ -601,7 +682,7 @@ refactor: 统一校准命令行入口
 python -m compileall -q .
 pytest -q
 python scripts/migrate_history.py --source tests/fixtures/legacy_history.json
-python calibrate_cli.py backtest --fixture tests/fixtures/matches.json
+python calibrate_cli.py backtest --fixture tests/fixtures/matches.json --allow-insufficient-data
 ```
 
 ### 7.3 浏览器验收
