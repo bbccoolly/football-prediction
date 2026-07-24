@@ -39,7 +39,7 @@ def test_repository_initializes_schema_and_seed_aliases(tmp_path):
 
     assert team["canonical_name"] == "拜仁"
     with sqlite3.connect(repository.database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")

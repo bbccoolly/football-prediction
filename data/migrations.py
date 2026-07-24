@@ -1,6 +1,6 @@
 """SQLite schema migrations for the standard football match repository."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA_V1 = """
@@ -149,10 +149,48 @@ CREATE TABLE odds_snapshots (
 """
 
 
+SCHEMA_V2 = """
+CREATE TABLE dataset_batches (
+    batch_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    manifest_fingerprint TEXT NOT NULL UNIQUE,
+    fetched_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE historical_closing_odds (
+    closing_odds_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES dataset_batches(batch_id) ON DELETE CASCADE,
+    match_id TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    source_record_pk TEXT NOT NULL REFERENCES source_records(source_record_pk) ON DELETE CASCADE,
+    company TEXT NOT NULL,
+    home_odds REAL NOT NULL CHECK (home_odds > 1),
+    draw_odds REAL NOT NULL CHECK (draw_odds > 1),
+    away_odds REAL NOT NULL CHECK (away_odds > 1),
+    evidence_type TEXT NOT NULL CHECK (evidence_type = 'source_declared_closing'),
+    observed_at TEXT NOT NULL,
+    source_file_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (batch_id, source_record_pk, company)
+);
+CREATE INDEX idx_closing_odds_match_batch
+    ON historical_closing_odds(match_id, batch_id, company);
+"""
+
+
+def _migrate_v1_to_v2(connection):
+    connection.executescript(SCHEMA_V2)
+    connection.execute("PRAGMA user_version = 2")
+
+
 def apply_migrations(connection):
-    """Initialize an empty database or validate the supported schema version."""
+    """Initialize an empty database or migrate it to the supported schema."""
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
+        return
+    if version == 1:
+        _migrate_v1_to_v2(connection)
         return
     if version != 0:
         raise RuntimeError(
@@ -166,4 +204,5 @@ def apply_migrations(connection):
         raise RuntimeError("database has tables but no supported schema version")
 
     connection.executescript(SCHEMA_V1)
-    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    connection.execute("PRAGMA user_version = 1")
+    _migrate_v1_to_v2(connection)

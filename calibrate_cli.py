@@ -103,6 +103,7 @@ def run_backtest_command(args):
     output_root = _output_root(args.output_root)
     config = BacktestConfig(
         as_of=args.as_of or _utc_now(), output_root=output_root,
+        dataset_batch_id=args.dataset_batch_id,
     )
     store = BacktestTaskStore(output_root)
     store.recover()
@@ -186,6 +187,7 @@ def build_parser():
     source.add_argument("--database")
     source.add_argument("--fixture")
     backtest_parser.add_argument("--as-of")
+    backtest_parser.add_argument("--dataset-batch-id")
     backtest_parser.add_argument("--run-id")
     backtest_parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     backtest_parser.add_argument("--allow-insufficient-data", action="store_true")

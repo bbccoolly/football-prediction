@@ -125,11 +125,10 @@ def _public_prediction(value):
 def _coverage_grade(match, consensus):
     has_source = int(match.get("source_count") or 0) > 0
     if (
-        match["time_precision"] == "minute" and has_source
-        and match.get("season") and consensus
+        has_source and match.get("season") and consensus
     ):
         return "full"
-    if match["time_precision"] == "minute" and has_source:
+    if has_source:
         return "standard"
     return "limited"
 
@@ -191,17 +190,17 @@ class BacktestRunner:
         market_inputs = {}
         odds_inventory = []
         for match in accepted:
-            if match["time_precision"] != "minute":
-                continue
-            rows = self.repository.list_latest_pre_match_odds(
-                match["match_id"], match["kickoff_utc"]
+            cutoff = match["kickoff_utc"] if match["time_precision"] == "minute" else f"{match['event_date']}T00:00:00+00:00"
+            rows = self.repository.list_backtest_odds(
+                match["match_id"], cutoff, self.config.dataset_batch_id
             )
             market_inputs[match["match_id"]] = market_consensus(rows)
             odds_inventory.extend({
                 key: row.get(key)
                 for key in (
                     "odds_snapshot_id", "match_id", "company", "captured_at",
-                    "home_odds", "draw_odds", "away_odds", "source",
+                    "home_odds", "draw_odds", "away_odds", "source", "evidence_type",
+                    "source_file_sha256", "source_record_pk", "batch_id",
                 )
             } for row in rows)
         source_matches_fingerprint = accepted_data_fingerprint(matches, {})
@@ -257,10 +256,10 @@ class BacktestRunner:
                 consensus = None
                 odds = None
                 predicted_at = batch["cutoff"]
+                consensus = market_inputs.get(match["match_id"])
                 if match["time_precision"] == "minute":
                     predicted_at = match["kickoff_utc"]
-                    consensus = market_inputs.get(match["match_id"])
-                    if consensus:
+                    if consensus and consensus.get("evidence_types") == ["captured_at"]:
                         odds = OddsSnapshot(
                             *consensus["synthetic_odds"],
                             captured_at=ensure_utc(consensus["captured_at"]),
@@ -302,6 +301,18 @@ class BacktestRunner:
                         )
                     }
                     derived = {"status": "no_available_models"}
+                if consensus:
+                    outputs["market_odds"] = {
+                        "available": True,
+                        "status": "ready",
+                        "home_win": consensus["probabilities"][0],
+                        "draw": consensus["probabilities"][1],
+                        "away_win": consensus["probabilities"][2],
+                        "evidence": {
+                            "evidence_types": consensus["evidence_types"],
+                            "companies": consensus["companies"],
+                        },
+                    }
                 outputs.update(simple)
                 for model_id in LEARNING_MODELS:
                     outputs[model_id] = {
@@ -404,6 +415,7 @@ class BacktestRunner:
             "artifact_inventory": artifact_catalog.public_inventory(),
             "code_commit": self.provenance["code_commit"],
             "data_fingerprint": data_fingerprint,
+            "dataset_batch_id": self.config.dataset_batch_id,
         }
         result_fingerprint = scientific_fingerprint(
             prediction_records, metrics, admission, protocol
@@ -413,6 +425,7 @@ class BacktestRunner:
             "run_id": run_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "as_of": self.config.as_of,
+            "dataset_batch_id": self.config.dataset_batch_id,
             "source": source or {"kind": "repository"},
             "provenance": self.provenance,
             "protocol": protocol,

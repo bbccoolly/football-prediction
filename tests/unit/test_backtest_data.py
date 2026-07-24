@@ -66,7 +66,8 @@ def test_market_consensus_uses_median_of_devigged_company_probabilities():
 
     result = market_consensus(rows)
 
-    assert result["source"] == "market_consensus_v1"
+    assert result["source"] == "market_consensus_v2"
+    assert result["evidence_types"] == ["captured_at"]
     assert result["companies"] == ["A", "B"]
     assert sum(result["probabilities"]) == pytest.approx(1.0)
     assert result["probabilities"][0] == pytest.approx(result["probabilities"][2])

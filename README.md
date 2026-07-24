@@ -77,6 +77,20 @@ python scripts/migrate_history.py --source data/processed/match_history.json --a
 
 默认数据库为 `data/processed/football.db`，可使用 `FOOTBALL_DB_PATH` 或 `--database PATH` 覆盖。运行时数据库和旧历史数据均被 Git 忽略，不应提交。
 
+### 欧洲五大联赛历史数据
+
+`football-data.co.uk` 的历史赛果和收盘赔率只能由显式 CLI 下载；启动、预测、自动化测试和回测不会联网。固定范围为英超、西甲、德甲、意甲、法甲的 2019/20 至 2024/25 来源文件。
+
+```powershell
+python scripts/sync_football_data.py fetch
+python scripts/sync_football_data.py audit --batch data/raw/football-data/<batch-id>
+python scripts/sync_football_data.py import --batch data/raw/football-data/<batch-id>
+python scripts/sync_football_data.py import --batch data/raw/football-data/<batch-id> --apply --expect-report-fingerprint <sha256>
+python scripts/sync_football_data.py readiness --batch-id <batch-id> --evaluation-as-of 2025-07-01T00:00:00Z
+```
+
+导入默认只在临时数据库执行 dry-run。来源声明的收盘赔率保留真实文件抓取时间，不能作为实时赔率或线上融合输入；仅可通过固定 `--dataset-batch-id` 进入离线回测市场基线。
+
 ### 命令行模式
 
 ```bash
@@ -180,6 +194,7 @@ PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1
 
 ```powershell
 python calibrate_cli.py backtest --database data/processed/football.db
+python calibrate_cli.py backtest --database data/processed/football.db --dataset-batch-id <batch-id> --as-of 2025-07-01T00:00:00Z
 python calibrate_cli.py backtest --fixture tests/fixtures/backtest_matches.json --allow-insufficient-data --as-of 2027-01-01T00:00:00Z
 python calibrate_cli.py report --run-id <run_id>
 python calibrate_cli.py admission --run-id <run_id>
@@ -197,6 +212,7 @@ python calibrate_cli.py admission --run-id <run_id>
 | 500.com | 实时赔率 + 近期比赛 | HTML 解析 |
 | 竞彩网 API | 实时赔率 + 比赛列表 | JSON 接口 |
 | FIFA API | 世界杯比赛数据 | 赛后同步 |
+| football-data.co.uk | 欧洲五大联赛历史赛果与来源声明收盘赔率 | 显式下载、批次校验和审计；收盘赔率仅用于离线回测 |
 | 内置 | 128 支球队 + 球员评级 | 国家队 + 俱乐部 |
 
 ## API 路由
