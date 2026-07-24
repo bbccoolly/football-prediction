@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-BACKTEST_SCHEMA_VERSION = 1
-BACKTEST_PROTOCOL_VERSION = "walk_forward_v1"
+BACKTEST_SCHEMA_VERSION = 2
+BACKTEST_PROTOCOL_VERSION = "walk_forward_v2"
 DEFAULT_OUTPUT_ROOT = Path("data/processed/backtests")
 MODEL_BASELINES = (
     "expanding_competition_rate", "recent_100_competition_rate",
@@ -49,6 +49,7 @@ def utc_iso(value: datetime | str) -> str:
 @dataclass(frozen=True)
 class BacktestConfig:
     as_of: str
+    dataset_batch_id: str | None = None
     output_root: Path = DEFAULT_OUTPUT_ROOT
     random_seed: int = 42
     bootstrap_iterations: int = 2000

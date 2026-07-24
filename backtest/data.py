@@ -212,14 +212,20 @@ def market_consensus(rows):
     total = sum(medians)
     probabilities = tuple(value / total for value in medians)
     selected = [row for row, _ in valid]
-    return {
+    evidence_types = sorted({row.get("evidence_type", "captured_at") for row in selected})
+    result = {
         "probabilities": probabilities,
         "synthetic_odds": tuple(1.0 / value for value in probabilities),
-        "captured_at": max(row["captured_at"] for row in selected),
-        "source": "market_consensus_v1",
+        "source": "market_consensus_v2",
         "companies": [row["company"] for row in selected],
         "odds_snapshot_ids": [row["odds_snapshot_id"] for row in selected],
+        "evidence_types": evidence_types,
+        "source_record_pks": [row.get("source_record_pk") for row in selected if row.get("source_record_pk")],
     }
+    captured = [row.get("captured_at") for row in selected if row.get("captured_at")]
+    if captured:
+        result["captured_at"] = max(captured)
+    return result
 
 
 def accepted_data_fingerprint(matches, excluded):

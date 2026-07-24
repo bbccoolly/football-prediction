@@ -14,6 +14,7 @@ from data.match_repository import (
     DEFAULT_DATABASE_PATH,
     MatchRepository,
     RepositoryNotInitializedError,
+    RepositorySchemaError,
 )
 from backtest.storage import create_run_id
 from backtest.tasks import BacktestAlreadyRunningError, BacktestTaskStore
@@ -104,7 +105,7 @@ def _normalize_upcoming(matches):
                 _repository.resolve_competition(str(competition_value))
                 if competition_value else None
             )
-        except RepositoryNotInitializedError:
+        except (RepositoryNotInitializedError, RepositorySchemaError):
             # Refresh remains usable before the local repository is initialized,
             # but unresolved cache entries must stay explicitly unpredictable.
             home = away = competition = None

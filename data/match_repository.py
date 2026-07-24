@@ -127,7 +127,10 @@ class MatchRepository:
             raise RepositorySchemaError(
                 f"比赛数据库 schema 版本不兼容: {version}, 需要 {SCHEMA_VERSION}"
             )
-        required = {"teams", "team_aliases", "matches", "source_records", "sync_runs"}
+        required = {
+            "teams", "team_aliases", "matches", "source_records", "sync_runs",
+            "dataset_batches", "historical_closing_odds",
+        }
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -309,6 +312,107 @@ class MatchRepository:
             if self.database_path != ":memory:":
                 connection.close()
 
+    @staticmethod
+    def _source_record_pk(record: SourceRecord):
+        raw_identity = fingerprint({
+            "competition": record.competition,
+            "season": record.season,
+            "home": normalize_alias(record.home_team_raw),
+            "away": normalize_alias(record.away_team_raw),
+            "event_date": record.event_date,
+        })
+        return stable_id(
+            "source-record",
+            f"{record.source}:{record.source_record_id or raw_identity}:{fingerprint(record.raw_payload)}",
+        )
+
+    def import_dataset_batch(self, manifest: Mapping[str, Any], records: Iterable[Any], sync_run_id: str):
+        """Atomically import one immutable external dataset batch and its closing odds."""
+        required = {"batch_id", "source", "manifest_fingerprint", "fetched_at"}
+        missing = required - set(manifest)
+        if missing:
+            raise ValueError(f"dataset batch 缺少字段: {', '.join(sorted(missing))}")
+        connection = self._connection()
+        counts = {key: 0 for key in (
+            "fetched", "inserted", "updated", "skipped", "rejected", "unmatched", "closing_odds",
+        )}
+        now = utc_now_iso()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO dataset_batches(batch_id, source, manifest_json, manifest_fingerprint, fetched_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    manifest_json=excluded.manifest_json,
+                    manifest_fingerprint=excluded.manifest_fingerprint
+                """,
+                (
+                    manifest["batch_id"], manifest["source"], canonical_json(manifest),
+                    manifest["manifest_fingerprint"], manifest["fetched_at"], now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO sync_runs(sync_run_id, sync_type, scope_json, started_at, status)
+                VALUES (?, 'football_data_batch', ?, ?, 'running')
+                ON CONFLICT(sync_run_id) DO NOTHING
+                """,
+                (sync_run_id, canonical_json({"batch_id": manifest["batch_id"]}), now),
+            )
+            for imported in records:
+                record = imported.record
+                counts["fetched"] += 1
+                outcome = self._import_one(connection, record, now)
+                counts[outcome] += 1
+                if outcome in {"rejected", "unmatched"}:
+                    continue
+                source_pk = self._source_record_pk(record)
+                row = connection.execute(
+                    """SELECT ms.match_id FROM match_sources ms
+                       WHERE ms.source_record_pk=?""", (source_pk,)
+                ).fetchone()
+                if row is None:
+                    raise RepositoryError("已导入来源记录未关联标准比赛")
+                for odds in imported.closing_odds:
+                    closing_id = stable_id(
+                        "historical-closing-odds",
+                        f"{manifest['batch_id']}:{source_pk}:{odds.company}",
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO historical_closing_odds(
+                            closing_odds_id, batch_id, match_id, source_record_pk, company,
+                            home_odds, draw_odds, away_odds, evidence_type, observed_at,
+                            source_file_sha256, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'source_declared_closing', ?, ?, ?)
+                        ON CONFLICT(batch_id, source_record_pk, company) DO NOTHING
+                        """,
+                        (
+                            closing_id, manifest["batch_id"], row["match_id"], source_pk,
+                            odds.company, odds.home_odds, odds.draw_odds, odds.away_odds,
+                            odds.observed_at, odds.source_file_sha256, now,
+                        ),
+                    )
+                    counts["closing_odds"] += 1
+            connection.execute(
+                """UPDATE sync_runs SET finished_at=?, fetched_count=?, inserted_count=?,
+                   updated_count=?, skipped_count=?, rejected_count=?, unmatched_count=?, status='completed'
+                   WHERE sync_run_id=?""",
+                (
+                    utc_now_iso(), counts["fetched"], counts["inserted"], counts["updated"],
+                    counts["skipped"], counts["rejected"], counts["unmatched"], sync_run_id,
+                ),
+            )
+            connection.commit()
+            return counts
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
     def _import_one(self, connection, record: SourceRecord, now: str) -> str:
         raw_json = canonical_json(record.raw_payload)
         payload_fingerprint = fingerprint(record.raw_payload)
@@ -319,10 +423,7 @@ class MatchRepository:
             "away": normalize_alias(record.away_team_raw),
             "event_date": record.event_date,
         })
-        source_pk = stable_id(
-            "source-record",
-            f"{record.source}:{record.source_record_id or raw_identity}:{payload_fingerprint}",
-        )
+        source_pk = self._source_record_pk(record)
         existing_source = connection.execute(
             "SELECT parse_status FROM source_records WHERE source_record_pk=?",
             (source_pk,),
@@ -406,6 +507,31 @@ class MatchRepository:
                 (identity,),
             ).fetchone()
             match_id = exact["match_id"] if exact else None
+        if match_id is None and record.season:
+            legacy = connection.execute(
+                """
+                SELECT match_id, home_goals, away_goals FROM matches
+                WHERE competition_id=? AND event_date=? AND home_team_id=? AND away_team_id=?
+                  AND season IS NULL
+                ORDER BY created_at
+                """,
+                (competition_id, record.event_date, home["team_id"], away["team_id"]),
+            ).fetchall()
+            if len(legacy) == 1:
+                candidate = legacy[0]
+                if candidate["home_goals"] != record.home_goals or candidate["away_goals"] != record.away_goals:
+                    connection.execute(
+                        "UPDATE source_records SET parse_status='rejected', error_summary='source_conflict' WHERE source_record_pk=?",
+                        (source_pk,),
+                    )
+                    return "rejected"
+                match_id = candidate["match_id"]
+            elif len(legacy) > 1:
+                connection.execute(
+                    "UPDATE source_records SET parse_status='rejected', error_summary='ambiguous_match_identity' WHERE source_record_pk=?",
+                    (source_pk,),
+                )
+                return "rejected"
         if match_id is None:
             identity_key = f"{record.source}:{record.source_record_id}" if record.source_record_id else identity
             match_id = stable_id("match", identity_key)
@@ -881,6 +1007,129 @@ class MatchRepository:
         finally:
             if self.database_path != ":memory:":
                 connection.close()
+
+    def list_backtest_odds(self, match_id: str, prediction_cutoff: str, dataset_batch_id: str | None = None):
+        """Return strict snapshots and, only when pinned, declared historical closing odds."""
+        selected = [dict(row) for row in self.list_latest_pre_match_odds(match_id, prediction_cutoff)]
+        for row in selected:
+            row["evidence_type"] = "captured_at"
+        if not dataset_batch_id:
+            return selected
+        connection = self._connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT closing_odds_id AS odds_snapshot_id, match_id, company,
+                       home_odds, draw_odds, away_odds, evidence_type, observed_at,
+                       source_file_sha256, source_record_pk, batch_id
+                FROM historical_closing_odds
+                WHERE match_id=? AND batch_id=?
+                ORDER BY company, closing_odds_id
+                """,
+                (match_id, dataset_batch_id),
+            ).fetchall()
+            strict_companies = {row["company"] for row in selected}
+            selected.extend(dict(row) for row in rows if row["company"] not in strict_companies)
+            return selected
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def get_dataset_batch(self, batch_id: str):
+        connection = self._connection()
+        try:
+            row = connection.execute("SELECT * FROM dataset_batches WHERE batch_id=?", (batch_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def build_data_readiness_report(self, *, batch_id: str, evaluation_as_of: str):
+        """Evaluate formal data gates without initializing prediction models."""
+        batch = self.get_dataset_batch(batch_id)
+        if batch is None:
+            raise ValueError("数据 batch 不存在")
+        from backtest.contracts import BacktestConfig
+        from backtest.data import filter_eligible_matches, split_by_natural_day
+
+        manifest = json.loads(batch["manifest_json"])
+        from data.football_data import DIVISIONS
+        scoped_names = {DIVISIONS[item["division"]] for item in manifest["files"]}
+        scoped_competitions = {_competition_id(name) for name in scoped_names}
+        config = BacktestConfig(as_of=evaluation_as_of)
+        scoped_matches = [
+            match for match in self.list_matches()
+            if match["competition_id"] in scoped_competitions
+        ]
+        accepted, excluded = filter_eligible_matches(scoped_matches, config)
+        partitions = split_by_natural_day(accepted, config)
+        accepted_ids = {match["match_id"] for match in accepted}
+        holdout_by_competition = {}
+        for match in partitions.holdout:
+            key = match["competition_id"]
+            holdout_by_competition[key] = holdout_by_competition.get(key, 0) + 1
+        connection = self._connection()
+        try:
+            odds_ids = {row[0] for row in connection.execute(
+                "SELECT DISTINCT match_id FROM historical_closing_odds WHERE batch_id=?", (batch_id,)
+            )}
+            source_status = {row["parse_status"]: row["count"] for row in connection.execute(
+                """SELECT parse_status, COUNT(*) AS count FROM source_records
+                   WHERE source=? AND fetched_at=? GROUP BY parse_status""",
+                (batch["source"], batch["fetched_at"]),
+            )}
+            pending_aliases = connection.execute(
+                "SELECT COUNT(*) FROM unmatched_team_aliases WHERE source=? AND status='pending'",
+                (batch["source"],),
+            ).fetchone()[0]
+            pending_duplicates = connection.execute(
+                "SELECT COUNT(*) FROM duplicate_candidates WHERE status='pending'"
+            ).fetchone()[0]
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+        coverage = len(accepted_ids & odds_ids) / len(accepted_ids) if accepted_ids else 0.0
+        coverage_by_scope = {}
+        for match in accepted:
+            key = f"{match['competition_id']}:{match.get('season') or 'unknown'}"
+            values = coverage_by_scope.setdefault(key, [0, 0])
+            values[0] += 1
+            values[1] += int(match["match_id"] in odds_ids)
+        coverage_by_scope = {
+            key: {"matches": total, "with_closing_odds": covered, "coverage": covered / total}
+            for key, (total, covered) in sorted(coverage_by_scope.items())
+        }
+        requirements = {
+            "complete_source_matrix": len(manifest["files"]) == 30 and len(scoped_competitions) == 5,
+            "minimum_formal_matches": len(accepted) >= config.minimum_formal_matches,
+            "minimum_holdout_matches": len(partitions.holdout) >= config.minimum_holdout_matches,
+            "minimum_competition_holdout_matches": bool(holdout_by_competition) and all(
+                count >= config.minimum_competition_holdout_matches
+                for count in holdout_by_competition.values()
+            ),
+            "no_source_rejections": source_status.get("rejected", 0) == 0,
+            "no_source_unmatched": source_status.get("unmatched", 0) == 0 and pending_aliases == 0,
+            "no_pending_duplicates": pending_duplicates == 0,
+            "closing_odds_coverage": coverage >= 0.95,
+            "closing_odds_coverage_by_competition_season": all(
+                value["coverage"] >= 0.90 for value in coverage_by_scope.values()
+            ),
+        }
+        report = {
+            "schema_version": 1, "batch_id": batch_id, "evaluation_as_of": config.as_of,
+            "database_fingerprint": self.build_data_fingerprint({}),
+            "batch_fingerprint": batch["manifest_fingerprint"],
+            "accepted_matches": len(accepted), "excluded": excluded,
+            "partitions": partitions.public_summary(),
+            "holdout_by_competition": dict(sorted(holdout_by_competition.items())),
+            "source_status": source_status, "pending_aliases": pending_aliases,
+            "pending_duplicates": pending_duplicates,
+            "closing_odds_coverage": coverage, "closing_odds_coverage_by_scope": coverage_by_scope,
+            "requirements": requirements,
+        }
+        report["status"] = "ready" if all(requirements.values()) else "not_ready"
+        report["report_fingerprint"] = fingerprint(report)
+        return report
 
     def build_data_fingerprint(
         self,
