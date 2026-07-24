@@ -9,7 +9,11 @@ import numpy as np
 from ensemble.prediction_contract import NoAvailableModelsError
 from config import *
 from data.history_db import load_history
-from data.match_repository import DEFAULT_DATABASE_PATH, MatchRepository
+from data.match_repository import (
+    DEFAULT_DATABASE_PATH,
+    MatchRepository,
+    RepositoryNotInitializedError,
+)
 from prediction import (
     InvalidPredictionRequestError,
     ModelExecutionError,
@@ -76,18 +80,23 @@ def _normalize_upcoming(matches):
     for raw in matches:
         match = dict(raw)
         source = str(match.get("source") or "*")
-        home = _repository.resolve_team(
-            match.get("home_team", ""), source, "unknown"
-        ) or _repository.resolve_team_unique(match.get("home_team", ""))
-        away = _repository.resolve_team(
-            match.get("away_team", ""), source, "unknown"
-        ) or _repository.resolve_team_unique(match.get("away_team", ""))
         league_raw = str(match.get("league") or "")
         competition_value = match.get("competition_id") or league_raw
-        competition = (
-            _repository.resolve_competition(str(competition_value))
-            if competition_value else None
-        )
+        try:
+            home = _repository.resolve_team(
+                match.get("home_team", ""), source, "unknown"
+            ) or _repository.resolve_team_unique(match.get("home_team", ""))
+            away = _repository.resolve_team(
+                match.get("away_team", ""), source, "unknown"
+            ) or _repository.resolve_team_unique(match.get("away_team", ""))
+            competition = (
+                _repository.resolve_competition(str(competition_value))
+                if competition_value else None
+            )
+        except RepositoryNotInitializedError:
+            # Refresh remains usable before the local repository is initialized,
+            # but unresolved cache entries must stay explicitly unpredictable.
+            home = away = competition = None
         predictable = bool(
             home and away and competition
             and home["team_id"] != away["team_id"]
