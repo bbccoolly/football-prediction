@@ -178,7 +178,7 @@ INITIAL_WEIGHTS = {
     "poisson": 0.12, "dixon_coles": 0.10, "elo": 0.10,
     "massey": 0.08, "form": 0.08, "head_to_head": 0.05,
     "market_odds": 0.12, "knn_similar": 0.05, "xgboost": 0.10,
-    "neural_net": 0.08, "monte_carlo": 0.07, "bayesian": 0.05,
+    "neural_net": 0.08, "monte_carlo": 0.0, "bayesian": 0.05,
 }
 
 DATA_DIR = "data"

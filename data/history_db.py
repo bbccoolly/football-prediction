@@ -3,9 +3,105 @@ data/history_db.py -- 持久化历史比赛数据库
 """
 
 import json, os, time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed", "match_history.json")
+
+
+def recent_completed_dates(now=None, days=14):
+    """返回最近已结束自然日，按新到旧排序且不包含当天。"""
+    if days <= 0:
+        raise ValueError("days must be positive")
+    current = now or datetime.now()
+    today = current.date()
+    return [
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(1, days + 1)
+    ]
+
+
+def fetch_500_history_date(date_str, request_get=None):
+    """抓取单日完场数据，并明确区分空数据、请求失败和解析失败。"""
+    import re
+    import requests
+
+    get = request_get or requests.get
+    try:
+        response = get(
+            f"https://live.500.com/?e={date_str}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+    except Exception as exc:
+        return {
+            "date": date_str,
+            "status": "request_failed",
+            "matches": [],
+            "error": str(exc),
+        }
+
+    if response.status_code != 200:
+        return {
+            "date": date_str,
+            "status": "request_failed",
+            "matches": [],
+            "error": f"http_{response.status_code}",
+        }
+
+    response.encoding = "gb2312"
+    skip = [
+        "退出", "个人中心", "全选", "反选", "设为首页", "首页", "开奖",
+        "登录", "注册", "比分", "完", "直播", "待",
+    ]
+    matches = []
+    scored_rows = 0
+    try:
+        rows = re.findall(r"<tr[^>]*?>(.*?)</tr>", response.text, re.DOTALL)
+        for row in rows:
+            score = re.search(r"(\d+)\s*-\s*(\d+)", row)
+            if not score:
+                continue
+            scored_rows += 1
+            teams = re.findall(r"<a[^>]*?>([^<]{2,30})</a>", row)
+            if len(teams) < 2:
+                continue
+            home, away = teams[0].strip(), teams[-1].strip()
+            if any(word in home or word in away for word in skip):
+                continue
+            matches.append({
+                "home_team": home,
+                "away_team": away,
+                "home_goals": int(score.group(1)),
+                "away_goals": int(score.group(2)),
+                "league": "",
+                "date": date_str,
+            })
+    except (AttributeError, TypeError, ValueError) as exc:
+        return {
+            "date": date_str,
+            "status": "parse_failed",
+            "matches": [],
+            "error": str(exc),
+        }
+
+    if matches:
+        status = "success"
+    elif scored_rows:
+        status = "parse_failed"
+    else:
+        status = "no_matches"
+    return {"date": date_str, "status": status, "matches": matches, "error": None}
+
+
+def fetch_recent_500_history(now=None, days=14, request_get=None):
+    results = [
+        fetch_500_history_date(date_str, request_get=request_get)
+        for date_str in recent_completed_dates(now=now, days=days)
+    ]
+    return {
+        "matches": [match for result in results for match in result["matches"]],
+        "days": results,
+    }
 
 def load_history():
     """加载所有历史比赛数据"""
@@ -52,26 +148,13 @@ def _build_initial_db():
 
     # 2. 500.com 近期完场
     try:
-        import requests, re
-        HEADERS = {"User-Agent": "Mozilla/5.0"}
-        for d in range(1, 15):
-            ds = (datetime.now().strftime("%Y-%m-%d") if d == 0 else 
-                  f"2026-06-{13-d:02d}" if d <= 13 else f"2026-05-{31-(d-13):02d}")
-            try:
-                r = requests.get(f"https://live.500.com/?e={ds}", headers=HEADERS, timeout=10)
-                r.encoding = "gb2312"
-                skip = ["退出","个人中心","全选","反选","设为首页","首页","开奖","登录","注册","比分","完","直播","待"]
-                for row in re.findall(r'<tr[^>]*?>(.*?)</tr>', r.text, re.DOTALL):
-                    sm = re.search(r'(\d+)\s*-\s*(\d+)', row)
-                    if not sm: continue
-                    teams = re.findall(r'<a[^>]*?>([^<]{2,30})</a>', row)
-                    if len(teams) < 2: continue
-                    h, a = teams[0].strip(), teams[-1].strip()
-                    if any(w in h or w in a for w in skip): continue
-                    matches.append({"home_team":h,"away_team":a,"home_goals":int(sm.group(1)),"away_goals":int(sm.group(2)),"league":"","date":ds})
-                time.sleep(0.3)
-            except: pass
-        print(f"  [500.com] 总计 {len(matches)} 场")
+        recent = fetch_recent_500_history(days=14)
+        matches.extend(recent["matches"])
+        status_counts = {}
+        for day in recent["days"]:
+            status = day["status"]
+            status_counts[status] = status_counts.get(status, 0) + 1
+        print(f"  [500.com] 总计 {len(matches)} 场，状态 {status_counts}")
     except Exception as e:
         print(f"  [500.com] 失败: {e}")
 

@@ -121,9 +121,9 @@ def run_backtest(matches, model_filter=None):
         "elo": ("ELO 评级", EloRating()),
         "massey": ("Massey 排名", MasseyRanking()),
         "form": ("近期状态", FormModel()),
-        "h2h": ("交锋记录", HeadToHeadModel()),
-        "market": ("市场赔率", MarketOddsModel()),
-        "knn": ("KNN 相似", KNNSimilarModel()),
+        "head_to_head": ("交锋记录", HeadToHeadModel()),
+        "market_odds": ("市场赔率", MarketOddsModel()),
+        "knn_similar": ("KNN 相似", KNNSimilarModel()),
         "xgboost": ("XGBoost", XGBoostModel()),
         "neural_net": ("神经网络", NeuralNetModel()),
         "monte_carlo": ("蒙特卡洛", MonteCarloModel(simulations=1000)),
@@ -238,8 +238,8 @@ def run_backtest(matches, model_filter=None):
 def print_report(results, total_matches):
     MODEL_NAMES = {
         "poisson":"泊松分布","dixon_coles":"Dixon-Coles","elo":"ELO 评级",
-        "massey":"Massey 排名","form":"近期状态","h2h":"交锋记录",
-        "market":"市场赔率","knn":"KNN 相似",
+        "massey":"Massey 排名","form":"近期状态","head_to_head":"交锋记录",
+        "market_odds":"市场赔率","knn_similar":"KNN 相似",
         "xgboost":"XGBoost","neural_net":"神经网络",
         "monte_carlo":"蒙特卡洛","bayesian":"贝叶斯层次",
     }
@@ -342,7 +342,7 @@ def save_calibration(results, weights, total_matches):
         }
 
     os.makedirs(os.path.dirname(WEIGHTS_FILE), exist_ok=True)
-    data = {"weights": {k: round(v,4) for k,v in weights.items()},
+    data = {"schema_version": 2, "weights": {k: round(v,4) for k,v in weights.items()},
             "report": report, "total_matches": total_matches,
             "calibrated_at": datetime.now().isoformat()}
     with open(WEIGHTS_FILE, "w", encoding="utf-8") as f:
@@ -372,7 +372,10 @@ def show_report():
 
     report = data.get("report", {})
     weights = data.get("weights", {})
-    MODEL_NAMES = {"poisson":"泊松分布","dixon_coles":"Dixon-Coles","elo":"ELO 评级","massey":"Massey 排名","form":"近期状态","h2h":"交锋记录","market":"市场赔率","knn":"KNN 相似","xgboost":"XGBoost","neural_net":"神经网络","monte_carlo":"蒙特卡洛","bayesian":"贝叶斯层次"}
+    aliases = {"h2h": "head_to_head", "market": "market_odds", "knn": "knn_similar"}
+    report = {aliases.get(key, key): value for key, value in report.items()}
+    weights = {aliases.get(key, key): value for key, value in weights.items()}
+    MODEL_NAMES = {"poisson":"泊松分布","dixon_coles":"Dixon-Coles","elo":"ELO 评级","massey":"Massey 排名","form":"近期状态","head_to_head":"交锋记录","market_odds":"市场赔率","knn_similar":"KNN 相似","xgboost":"XGBoost","neural_net":"神经网络","monte_carlo":"蒙特卡洛","bayesian":"贝叶斯层次"}
 
     r1=c('模型',Colors.BOLD); r2=c('准确率',Colors.DIM); r3=c('Brier',Colors.DIM); r4=c('权重',Colors.DIM)
     print(f"\n  {r1:<16} {r2:>7} {r3:>8} {r4:>8}")
@@ -386,7 +389,7 @@ def show_report():
         else: color = Colors.RED
         nm = c(MODEL_NAMES.get(key,key), Colors.BOLD)
         ac = c(f"{acc:5.1f}%", color)
-        br = c(f"{r.get("brier",0):.4f}", Colors.DIM)
+        br = c(f"{r.get('brier', 0):.4f}", Colors.DIM)
         wt = c(f"{w*100:5.1f}%", Colors.CYAN)
         print(f"  {nm:<16} {ac:>7} {br:>8} {wt:>8}")
 

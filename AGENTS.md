@@ -23,8 +23,10 @@
 
 - 使用 Python 3.10 或更高版本。
 - 安装依赖：`python -m pip install -r requirements.txt`。
+- 安装开发依赖：`python -m pip install -r requirements-dev.txt`。
 - 启动 Web 应用：`python run.py`。
 - 启动交互式命令行：`python main.py`。
+- 执行自动化测试：`pytest -q`。测试默认禁止网络访问。
 - 执行编译检查：`python -m compileall -q .`。
 - 只有在允许联网和写入生成数据时，才运行校准：`python calibrate.py`。
 
@@ -48,4 +50,10 @@
 
 ## 验证要求
 
-项目目前没有项目级自动化测试。进行小范围修改后，至少运行 `python -m compileall -q .` 和对应的定向冒烟检查。只读分析期间不要触发模型初始化，因为初始化可能抓取数据并更新本地 ELO 或模型产物。
+修改后至少运行 `pytest -q`、`python -m compileall -q .` 和对应的定向冒烟检查。涉及页面交互时还需完成浏览器验收。只读分析期间不要触发模型初始化，因为初始化可能抓取数据并更新本地 ELO 或模型产物。
+
+## 深入文档
+
+- `docs/optimization-roadmap.md`：后续阶段、模型准入和完成定义。
+- `docs/iteration-a-implementation-plan.md`：预测正确性基座的接口、迁移和验收细节。
+- `docs/iteration-b-implementation-plan.md`：数据治理、共享预测服务、可信回测和准入细节。

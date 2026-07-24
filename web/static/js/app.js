@@ -425,7 +425,13 @@ function renderResults(data) {
     document.querySelector("#probDraw .val").textContent = (ens.draw * 100).toFixed(1) + "%";
     document.querySelector("#probAway .val").textContent = (ens.away_win * 100).toFixed(1) + "%";
     document.querySelector("#showGoals").textContent = ens.expected_total_goals.toFixed(1);
-    document.querySelector("#showConf").textContent = data.confidence.toFixed(0) + "%";
+    var agreement = data.model_agreement;
+    if (agreement === undefined || agreement === null) agreement = data.confidence || 0;
+    document.querySelector("#showConf").textContent = agreement.toFixed(0) + "%";
+    var summary = data.model_summary || {};
+    document.querySelector("#showModelCount").textContent =
+        (summary.available_models !== undefined ? summary.available_models : "-")
+        + " / " + (summary.total_models !== undefined ? summary.total_models : "-");
 
     highlightMax(".prob-block", [ens.home_win, ens.draw, ens.away_win]);
     renderPieChart(ens.home_win, ens.draw, ens.away_win);
@@ -440,9 +446,10 @@ function renderResults(data) {
     }
     document.getElementById("topScores").innerHTML = scoresHtml;
 
-    renderModelsTable(data.predictions, ens.weights || {});
+    renderModelsTable(data.predictions, ens.effective_weights || ens.weights || {});
 
-    var gd = (data.predictions.monte_carlo && data.predictions.monte_carlo.total_goals_dist)
+    var gd = (data.simulation && data.simulation.total_goals_dist)
+          || (data.predictions.monte_carlo && data.predictions.monte_carlo.total_goals_dist)
           || (data.predictions.poisson && data.predictions.poisson.total_goals_dist)
           || {};
     renderGoalsChart(gd);
@@ -559,7 +566,7 @@ var MODEL_DESC = {
     knn_similar: "K近邻相似：找出历史上特征（攻防/状态/ELO）最接近的 K 场比赛，加权投票预测。“类似对手当年怎么打就怎么预测”。",
     xgboost: "XGBoost集成：梯度提升决策树集成，200棵树逐步纠错。双头输出：胜平负概率 + 总进球数。擅长捕捉非线性组合规律。",
     neural_net: "神经网络：3层全连接网络(18-32-16-3)，SGD反向传播训练。理论上能拟合任意复杂函数，但容易过拟合。",
-    monte_carlo: "蒙特卡洛模拟：将各模型输出当作分布采样，模拟 10000 场比赛，统计各结果频率。可以融合多个模型的不确定性。",
+    monte_carlo: "蒙特卡洛模拟：对最终融合概率进行 10000 次派生采样，用于展示比分和总进球分布，不作为独立模型重复参与融合。",
     bayesian: "贝叶斯层次：用贝叶斯推断估计每队的隐藏实力参数，先验分布+似然函数→后验分布。对数据稀疏球队也能给出合理估计。",
 };
 
@@ -569,14 +576,20 @@ function renderModelsTable(preds, weights) {
     for (var key in preds) {
         if (!preds.hasOwnProperty(key)) continue;
         var pred = preds[key];
+        if (pred.role === "derived" || pred.status === "derived") continue;
         var w = weights[key] || 0;
+        var unavailable = pred.available === false;
         var goals = pred.expected_total_goals ? pred.expected_total_goals.toFixed(1) : "-";
-        var cls = pred.status ? "dimmed" : "";
+        var cls = unavailable ? "dimmed" : "";
+        var reason = (pred.warnings || []).join(", ") || pred.status || "不可用";
+        var home = unavailable ? "不可用" : (pred.home_win * 100).toFixed(1) + "%";
+        var draw = unavailable ? "-" : (pred.draw * 100).toFixed(1) + "%";
+        var away = unavailable ? "-" : (pred.away_win * 100).toFixed(1) + "%";
         html += "<tr class='" + cls + "'>"
              + "<td class='model-name' data-model='" + key + "' onclick='showModelInfo(event, \"" + key + "\")' title='点击查看模型介绍'>" + (MODEL_NAMES[key] || key) + "</td>"
-             + "<td class='prob-cell h'>" + (pred.home_win * 100).toFixed(1) + "%</td>"
-             + "<td class='prob-cell d'>" + (pred.draw * 100).toFixed(1) + "%</td>"
-             + "<td class='prob-cell a'>" + (pred.away_win * 100).toFixed(1) + "%</td>"
+             + "<td class='prob-cell h' title='" + reason + "'>" + home + "</td>"
+             + "<td class='prob-cell d'>" + draw + "</td>"
+             + "<td class='prob-cell a'>" + away + "</td>"
              + "<td>" + goals + "</td>"
              + "<td>" + (w * 100).toFixed(1) + "%</td>"
              + "</tr>";
@@ -697,7 +710,7 @@ async function refreshData() {
     btn.disabled = true;
     btn.textContent = "刷新中...";
     try {
-        var r = await fetch("/api/refresh_data");
+        var r = await window.adminApi.request("/api/refresh_data");
         var d = await r.json();
         if (d.status === "ok") {
             alert("成功获取 " + d.upcoming + " 场比赛数据！刷新页面查看。");
@@ -995,7 +1008,7 @@ function syncFifa() {
     var btn = event.target;
     btn.disabled = true;
     btn.textContent = '同步中...';
-    fetch('/api/sync_fifa').then(function(r) { return r.json(); }).then(function(d) {
+    window.adminApi.request('/api/sync_fifa').then(function(r) { return r.json(); }).then(function(d) {
         alert('同步完成: 获取' + d.fetched + '场, 新增' + d.added + '场');
         loadWcMatches();
         loadSidebar();

@@ -187,7 +187,7 @@ def backtest(matches):
 
     results = {name: {"brier": 0, "correct": 0, "total": 0, "log_loss": 0}
                for name in ["poisson","dixon_coles","elo","massey","form","head_to_head",
-                            "market_odds","knn","xgboost","neural_net","monte_carlo","bayesian"]}
+                            "market_odds","knn_similar","xgboost","neural_net","monte_carlo","bayesian"]}
 
     for i, m in enumerate(test):
         home = m["home_team"]
@@ -207,7 +207,7 @@ def backtest(matches):
             fq = knn.feature_vector(1,1,1,1, form.get_form_score(home)["form_score"], form.get_form_score(away)["form_score"],
                                     elo.get_rating(home), elo.get_rating(away),
                                     elo.get_rating(home)-elo.get_rating(away))
-            preds["knn"] = knn.predict(fq)
+            preds["knn_similar"] = knn.predict(fq)
             preds["xgboost"] = xgb.predict(fq)
             preds["neural_net"] = nn.predict(fq)
             preds["monte_carlo"] = mc.simulate(list(preds.values()), [1]*len(preds))
@@ -316,7 +316,7 @@ def main():
         from config import WEIGHTS_FILE
         os.makedirs(os.path.dirname(WEIGHTS_FILE), exist_ok=True)
         with open(WEIGHTS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"weights": weights, "calibrated_at": datetime.now().isoformat(),
+            json.dump({"schema_version": 2, "weights": weights, "calibrated_at": datetime.now().isoformat(),
                         "matches_used": len(matches), "report": report}, f, ensure_ascii=False, indent=2)
         print(f"\n  权重已保存到 {WEIGHTS_FILE}")
 
@@ -324,7 +324,7 @@ def main():
     report_file = "data/processed/calibration_report.json"
     os.makedirs(os.path.dirname(report_file), exist_ok=True)
     with open(report_file, "w", encoding="utf-8") as f:
-        json.dump({"report": report, "weights": weights, "total_matches": len(matches),
+        json.dump({"schema_version": 2, "report": report, "weights": weights, "total_matches": len(matches),
                     "calibrated_at": datetime.now().isoformat()}, f, ensure_ascii=False, indent=2)
     print(f"  回测报告已保存到 {report_file}")
 

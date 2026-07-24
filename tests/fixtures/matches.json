@@ -1,0 +1,40 @@
+[
+  {
+    "match_id": "club-2",
+    "date": "2026-01-03",
+    "league": "测试联赛",
+    "home_team": "蓝队",
+    "away_team": "红队",
+    "home_goals": 0,
+    "away_goals": 1,
+    "neutral": false
+  },
+  {
+    "match_id": "club-1",
+    "date": "2026-01-01",
+    "league": "测试联赛",
+    "home_team": "红队",
+    "away_team": "蓝队",
+    "home_goals": 2,
+    "away_goals": 0,
+    "neutral": false
+  },
+  {
+    "match_id": "national-1",
+    "date_time": "2026-01-02T18:00:00Z",
+    "league": "测试杯赛",
+    "home_team": "甲国",
+    "away_team": "乙国",
+    "home_goals": 1,
+    "away_goals": 1,
+    "neutral": true,
+    "importance": 1.2
+  },
+  {
+    "home_team": "未知甲",
+    "away_team": "未知乙",
+    "home_goals": 3,
+    "away_goals": 2,
+    "neutral": false
+  }
+]
