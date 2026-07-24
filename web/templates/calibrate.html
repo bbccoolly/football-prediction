@@ -6,7 +6,7 @@
 <title>回测与模型准入 - 足球预测系统</title>
 <link rel="stylesheet" href="/static/css/style.css?v=9">
 <style>
-.backtest-page{max-width:1080px;margin:0 auto;padding:20px}.back-link{color:var(--text-dim);font-size:.82rem;text-decoration:none}.page-head{margin:18px 0 24px}.page-head h1{font-size:1.55rem;margin:0 0 5px}.page-head p{font-size:.84rem;color:var(--text-muted);margin:0}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:16px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}.toolbar .status{font-size:.8rem;color:var(--text-dim);margin-left:auto}.progress{display:none;margin:16px 0}.progress.active{display:block}.progress-track{height:10px;background:var(--bg-input);border:1px solid var(--border);overflow:hidden}.progress-fill{height:100%;width:0;background:var(--green);transition:width .25s}.progress-meta{display:flex;justify-content:space-between;margin-top:7px;font-size:.75rem;color:var(--text-dim)}.summary{display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--border);border:1px solid var(--border);margin:22px 0}.summary.visible{display:grid}.summary-item{background:var(--bg-card);padding:14px}.summary-label{font-size:.72rem;color:var(--text-dim)}.summary-value{font-size:1.1rem;font-weight:700;margin-top:4px;overflow-wrap:anywhere}.section{display:none;margin-top:24px}.section.visible{display:block}.section h2{font-size:1rem;margin:0 0 12px}.table-wrap{overflow:auto;border:1px solid var(--border)}table{width:100%;border-collapse:collapse;font-size:.82rem;min-width:720px}th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border)}th{font-size:.72rem;color:var(--text-muted);background:var(--bg-input)}tr:last-child td{border-bottom:0}.state{font-weight:700}.state-admitted{color:var(--green)}.state-rejected{color:#ef4444}.state-research_only,.state-insufficient_data{color:var(--amber)}.state-not_evaluated{color:var(--text-dim)}.empty{padding:48px 0;text-align:center;color:var(--text-muted);font-size:.85rem}.error{color:#ef4444}.run-id{font-family:monospace;font-size:.75rem}@media(max-width:720px){.backtest-page{padding:14px}.toolbar .status{width:100%;margin-left:0}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.page-head h1{font-size:1.3rem}}
+.backtest-page{max-width:1080px;margin:0 auto;padding:20px}.back-link{color:var(--text-dim);font-size:.82rem;text-decoration:none}.page-head{margin:18px 0 24px}.page-head h1{font-size:1.55rem;margin:0 0 5px}.page-head p{font-size:.84rem;color:var(--text-muted);margin:0}.run-controls{display:grid;grid-template-columns:minmax(240px,2fr) minmax(210px,1fr) auto;gap:12px;align-items:end;padding:16px 0;border-top:1px solid var(--border)}.field{display:grid;gap:6px}.field label{font-size:.72rem;color:var(--text-dim)}.field select,.field input{height:38px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);padding:0 10px;min-width:0}.toggle{height:38px;display:flex;align-items:center;gap:8px;color:var(--text-dim);font-size:.8rem;white-space:nowrap}.toggle input{accent-color:var(--green)}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border)}.toolbar .status{font-size:.8rem;color:var(--text-dim);margin-left:auto}.resume-button{display:none}.resume-button.visible{display:inline-flex}.progress{display:none;margin:16px 0}.progress.active{display:block}.progress-track{height:10px;background:var(--bg-input);border:1px solid var(--border);overflow:hidden}.progress-fill{height:100%;width:0;background:var(--green);transition:width .25s}.progress-meta{display:flex;justify-content:space-between;gap:12px;margin-top:7px;font-size:.75rem;color:var(--text-dim)}.summary{display:none;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--border);border:1px solid var(--border);margin:22px 0}.summary.visible{display:grid}.summary-item{background:var(--bg-card);padding:14px}.summary-label{font-size:.72rem;color:var(--text-dim)}.summary-value{font-size:1.1rem;font-weight:700;margin-top:4px;overflow-wrap:anywhere}.section{display:none;margin-top:24px}.section.visible{display:block}.section h2{font-size:1rem;margin:0 0 12px}.table-wrap{overflow:auto;border:1px solid var(--border)}table{width:100%;border-collapse:collapse;font-size:.82rem;min-width:720px}th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border)}th{font-size:.72rem;color:var(--text-muted);background:var(--bg-input)}tr:last-child td{border-bottom:0}.state{font-weight:700}.state-admitted{color:var(--green)}.state-rejected,.state-failed{color:#ef4444}.state-research_only,.state-insufficient_data,.state-interrupted{color:var(--amber)}.state-not_evaluated{color:var(--text-dim)}.empty{padding:48px 0;text-align:center;color:var(--text-muted);font-size:.85rem}.error{color:#ef4444}.run-id{font-family:monospace;font-size:.75rem}@media(max-width:720px){.backtest-page{padding:14px}.run-controls{grid-template-columns:1fr}.toolbar .status{width:100%;margin-left:0}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.page-head h1{font-size:1.3rem}}
 </style>
 </head>
 <body>
@@ -17,8 +17,14 @@
     <p id="runMeta">尚未加载回测运行</p>
   </header>
 
+  <div class="run-controls">
+    <div class="field"><label for="datasetSelect">数据批次</label><select id="datasetSelect"><option value="">全部标准比赛（科研）</option></select></div>
+    <div class="field"><label for="asOfInput">截止时间（UTC）</label><input id="asOfInput" type="datetime-local" step="1"></div>
+    <label class="toggle"><input id="researchToggle" type="checkbox" checked>科研模式</label>
+  </div>
   <div class="toolbar">
     <button class="btn btn-primary" id="runBtn" type="button">运行回测</button>
+    <button class="btn btn-outline resume-button" id="resumeBtn" type="button">恢复运行</button>
     <button class="btn btn-outline" id="loadBtn" type="button">加载最近报告</button>
     <span class="status" id="statusText">就绪</span>
   </div>
@@ -54,14 +60,22 @@ let activeRunId=null;
 let pollTimer=null;
 const byId=id=>document.getElementById(id);
 
-function setBusy(busy){byId('runBtn').disabled=busy;byId('runBtn').textContent=busy?'运行中':'运行回测';}
+function setBusy(busy){byId('runBtn').disabled=busy;byId('resumeBtn').disabled=busy;byId('runBtn').textContent=busy?'运行中':'运行回测';}
 function errorMessage(data){return data.error||data.message||'请求失败';}
 function schedulePoll(){if(pollTimer)clearTimeout(pollTimer);pollTimer=setTimeout(pollStatus,1500);}
 
-async function startBacktest(){
+async function startBacktest(resume){
   setBusy(true);byId('statusText').textContent='正在启动后台回测';byId('progressBox').classList.add('active');
   try{
-    const response=await window.adminApi.request('/api/calibrate/run');
+    let payload;
+    if(resume){payload={resume_run_id:activeRunId};}
+    else{
+      const asOf=byId('asOfInput').value;
+      payload={research_only:byId('researchToggle').checked};
+      if(byId('datasetSelect').value)payload.dataset_batch_id=byId('datasetSelect').value;
+      if(asOf)payload.as_of=new Date(asOf+'Z').toISOString();
+    }
+    const response=await window.adminApi.request('/api/calibrate/run',{headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const data=await response.json();
     if(!response.ok){
       if(response.status===409&&data.details&&data.details.run_id){activeRunId=data.details.run_id;schedulePoll();return;}
@@ -79,8 +93,12 @@ async function pollStatus(){
     const run=data.run;const progress=run.progress||{};const percent=Number(progress.percent||0);
     byId('progressFill').style.width=Math.max(0,Math.min(100,percent))+'%';
     byId('progressValue').textContent=percent.toFixed(1)+'%';
-    byId('progressPhase').textContent=(progress.phase||run.state)+' · '+(progress.processed_matches||0)+' / '+(progress.total_matches||0);
-    byId('statusText').textContent=run.state==='completed'?'回测完成':run.state==='failed'?'回测失败':'后台运行中';
+    const checkpoint=progress.latest_checkpoint?' · '+progress.latest_checkpoint:'';
+    byId('progressPhase').textContent=(progress.current_batch_id||progress.phase||run.state)+checkpoint+' · '+(progress.processed_matches||0)+' / '+(progress.total_matches||0);
+    const stateText={completed:'回测完成',failed:'回测失败',interrupted:'回测已中断',queued:'等待运行',running:'后台运行中'};
+    byId('statusText').textContent=stateText[run.state]||run.state;
+    byId('statusText').className='status state-'+run.state;
+    byId('resumeBtn').classList.toggle('visible',Boolean(run.resumable));
     if(run.state==='completed'){setBusy(false);await loadReport(activeRunId);return;}
     if(run.state==='failed'||run.state==='interrupted'){setBusy(false);byId('statusText').textContent=run.error?run.error.message:run.state;return;}
     schedulePoll();
@@ -112,8 +130,25 @@ async function loadReport(runId){
   catch(error){byId('statusText').textContent=error.message;}
 }
 
-byId('runBtn').addEventListener('click',startBacktest);
+async function loadDatasets(){
+  try{
+    const response=await fetch('/api/calibration/datasets');const data=await response.json();
+    if(!response.ok)throw new Error(errorMessage(data));
+    const select=byId('datasetSelect');
+    data.datasets.forEach(dataset=>{
+      const option=document.createElement('option');option.value=dataset.batch_id;
+      const readiness=dataset.formal_eligible?'可正式运行':'仅科研';
+      option.textContent=dataset.batch_id+' · '+dataset.member_count+' 场 · '+readiness;
+      select.appendChild(option);
+    });
+  }catch(error){byId('statusText').textContent=error.message;}
+}
+
+byId('asOfInput').value=new Date().toISOString().slice(0,19);
+byId('runBtn').addEventListener('click',()=>startBacktest(false));
+byId('resumeBtn').addEventListener('click',()=>startBacktest(true));
 byId('loadBtn').addEventListener('click',()=>loadReport(null));
+loadDatasets();
 </script>
 </body>
 </html>

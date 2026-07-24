@@ -1,6 +1,6 @@
 """SQLite schema migrations for the standard football match repository."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_V1 = """
@@ -179,9 +179,43 @@ CREATE INDEX idx_closing_odds_match_batch
 """
 
 
+SCHEMA_V3 = """
+ALTER TABLE dataset_batches ADD COLUMN membership_status TEXT NOT NULL DEFAULT 'membership_incomplete';
+ALTER TABLE dataset_batches ADD COLUMN member_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dataset_batches ADD COLUMN expected_member_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE dataset_batch_matches (
+    batch_id TEXT NOT NULL REFERENCES dataset_batches(batch_id) ON DELETE CASCADE,
+    source_record_pk TEXT NOT NULL REFERENCES source_records(source_record_pk) ON DELETE CASCADE,
+    match_id TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    PRIMARY KEY (batch_id, source_record_pk)
+);
+CREATE INDEX idx_dataset_batch_matches_batch_match
+    ON dataset_batch_matches(batch_id, match_id);
+
+INSERT OR IGNORE INTO dataset_batch_matches(batch_id, source_record_pk, match_id)
+SELECT DISTINCT batch_id, source_record_pk, match_id
+FROM historical_closing_odds;
+
+UPDATE dataset_batches
+SET member_count = (
+    SELECT COUNT(*) FROM dataset_batch_matches dbm
+    WHERE dbm.batch_id = dataset_batches.batch_id
+), expected_member_count = (
+    SELECT COUNT(*) FROM dataset_batch_matches dbm
+    WHERE dbm.batch_id = dataset_batches.batch_id
+), membership_status = 'membership_incomplete';
+"""
+
+
 def _migrate_v1_to_v2(connection):
     connection.executescript(SCHEMA_V2)
     connection.execute("PRAGMA user_version = 2")
+
+
+def _migrate_v2_to_v3(connection):
+    connection.executescript(SCHEMA_V3)
+    connection.execute("PRAGMA user_version = 3")
 
 
 def apply_migrations(connection):
@@ -189,8 +223,12 @@ def apply_migrations(connection):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
         return
+    if version == 2:
+        _migrate_v2_to_v3(connection)
+        return
     if version == 1:
         _migrate_v1_to_v2(connection)
+        _migrate_v2_to_v3(connection)
         return
     if version != 0:
         raise RuntimeError(
@@ -206,3 +244,4 @@ def apply_migrations(connection):
     connection.executescript(SCHEMA_V1)
     connection.execute("PRAGMA user_version = 1")
     _migrate_v1_to_v2(connection)
+    _migrate_v2_to_v3(connection)

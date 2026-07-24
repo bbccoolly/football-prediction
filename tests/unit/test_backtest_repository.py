@@ -48,3 +48,11 @@ def test_latest_pre_match_odds_selects_one_strict_snapshot_per_company(tmp_path)
     assert [(row["company"], row["home_odds"]) for row in rows] == [
         ("A", 1.9), ("B", 2.1),
     ]
+
+    expected = repository.list_backtest_odds(
+        match_id, "2025-01-01T18:00:00Z"
+    )
+    bulk = repository.list_backtest_odds_bulk({
+        match_id: "2025-01-01T18:00:00Z",
+    })
+    assert bulk[match_id] == expected

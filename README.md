@@ -196,6 +196,8 @@ PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1
 python calibrate_cli.py backtest --database data/processed/football.db
 python calibrate_cli.py backtest --database data/processed/football.db --dataset-batch-id <batch-id> --as-of 2025-07-01T00:00:00Z
 python calibrate_cli.py backtest --fixture tests/fixtures/backtest_matches.json --allow-insufficient-data --as-of 2027-01-01T00:00:00Z
+python calibrate_cli.py backtest --fixture tests/fixtures/backtest_matches.json --research-only --run-id RUN_ID
+python calibrate_cli.py backtest --resume RUN_ID --output-root data/processed/backtests
 python calibrate_cli.py report --run-id <run_id>
 python calibrate_cli.py admission --run-id <run_id>
 ```
@@ -203,6 +205,8 @@ python calibrate_cli.py admission --run-id <run_id>
 退出码 `0` 表示完成，`1` 表示配置或执行失败，`2` 表示报告已完成但正式数据门禁不足。当前本地历史规模低于 1500 场，正常结果应是 `research_only` 或 `insufficient_data`，不能据此启用模型。
 
 回测不会联网、训练学习模型或写入线上权重。XGBoost、神经网络和 Stacking 在本阶段统一为 `not_evaluated`；任何线上权重调整仍需独立审查。
+
+V3 回测按自然日或精确开赛时间批次提交 segment 和检查点。运行目录包含不可变运行规格、输入与结果指纹、阶段指标和性能记录。只有进程丢失或用户中断的运行允许恢复；输入、规格或检查点链变化会被拒绝。fixture 和 Web 默认使用科研模式，不会产生生产准入或写入权重。
 
 ## 数据来源
 
@@ -228,6 +232,7 @@ python calibrate_cli.py admission --run-id <run_id>
 | `/api/status` | GET | 数据、活动快照、模型状态和刷新状态 |
 | `/api/progress/<id>` | SSE | 预测进度推送 |
 | `/api/calibration` | GET | 最近一次已完成的回测报告 |
+| `/api/calibration/datasets` | GET | 可用数据批次、成员完整性和 readiness |
 | `/api/calibrate/run` | POST | 启动后台 Walk-forward 回测（管理令牌） |
 | `/api/calibrate/status` | GET | 按 run ID 查询持久化任务状态 |
 | `/api/calibrate/report` | GET | 按 run ID 查询指标和准入报告 |

@@ -17,7 +17,7 @@ from backtest.contracts import (
     BacktestConfigurationError,
     BacktestDataError,
 )
-from backtest.storage import create_run_id
+from backtest.storage import BacktestCheckpointStore, create_run_id
 from backtest.tasks import BacktestAlreadyRunningError, BacktestTaskStore
 from data.match_repository import MatchRepository
 from data.source_adapters import adapt_legacy_match
@@ -78,7 +78,8 @@ def _prepare_fixture(path, temporary_directory, as_of):
             f"rejected={counts['rejected']}, unmatched={counts['unmatched']}"
         )
     return repository, {
-        "kind": "fixture", "name": path.name, "import_counts": counts,
+        "kind": "fixture", "name": path.name, "locator": str(path),
+        "import_counts": counts,
     }
 
 
@@ -90,7 +91,7 @@ def _prepare_database(path, temporary_directory):
     snapshot_path = Path(temporary_directory) / "database-snapshot.db"
     source_repository.backup_to(snapshot_path)
     return MatchRepository(snapshot_path), {
-        "kind": "database", "name": source_path.name,
+        "kind": "database", "name": source_path.name, "locator": str(source_path),
     }
 
 
@@ -99,36 +100,73 @@ def run_backtest_command(args):
         raise BacktestConfigurationError(
             "--allow-insufficient-data 只能与 --fixture 一起使用"
         )
-    run_id = _validate_run_id(args.run_id or create_run_id())
     output_root = _output_root(args.output_root)
-    config = BacktestConfig(
-        as_of=args.as_of or _utc_now(), output_root=output_root,
-        dataset_batch_id=args.dataset_batch_id,
-    )
     store = BacktestTaskStore(output_root)
     store.recover()
-    store.reserve(run_id)
-    store.claim(run_id, os.getpid())
+    resume = bool(args.resume)
+    if resume and any((
+        args.run_id, args.as_of, args.dataset_batch_id,
+        args.research_only, args.allow_insufficient_data,
+    )):
+        raise BacktestConfigurationError(
+            "--resume 不能与新运行参数组合使用"
+        )
+    run_id = _validate_run_id(args.resume or args.run_id or create_run_id())
+    if resume:
+        run_spec = BacktestCheckpointStore(
+            store.run_dir(run_id), run_id
+        ).load_run_spec()
+        config_values = dict(run_spec.get("config") or {})
+        config_values["output_root"] = output_root
+        config = BacktestConfig(**config_values)
+        source_spec = run_spec.get("source") or {}
+    else:
+        config = BacktestConfig(
+            as_of=args.as_of or _utc_now(), output_root=output_root,
+            dataset_batch_id=args.dataset_batch_id,
+            research_only=bool(args.research_only or args.fixture),
+        )
+        source_spec = None
+    if args.attempt_id:
+        reservation = {"attempt_id": args.attempt_id}
+    else:
+        reservation = store.reserve(run_id, resume=resume)
+    attempt_id = reservation.get("attempt_id")
+    store.claim(run_id, os.getpid(), attempt_id=attempt_id)
     try:
         with tempfile.TemporaryDirectory(prefix="football-backtest-") as temporary:
-            if args.fixture:
+            source_kind = (source_spec or {}).get("kind")
+            if args.fixture or source_kind == "fixture":
+                fixture_path = args.fixture or source_spec.get("locator")
                 repository, source = _prepare_fixture(
-                    _fixture_path(args.fixture), temporary, config.as_of
+                    _fixture_path(fixture_path), temporary, config.as_of
                 )
             else:
-                repository, source = _prepare_database(args.database, temporary)
+                database_path = args.database or (source_spec or {}).get("locator")
+                repository, source = _prepare_database(database_path, temporary)
             try:
+                source["allow_insufficient_data"] = bool(
+                    args.allow_insufficient_data
+                    or (source_spec or {}).get("allow_insufficient_data", False)
+                )
                 runner = BacktestRunner(repository, config)
                 result = runner.run(
                     run_id, source=source,
-                    progress=lambda **values: store.update_progress(run_id, **values),
+                    progress=lambda **values: store.update_progress(
+                        run_id, attempt_id=attempt_id, **values
+                    ),
+                    resume=resume,
                 )
             finally:
                 repository.close()
         insufficient = result["insufficient_data"]
-        exit_code = 0 if not insufficient or args.allow_insufficient_data else 2
+        allow_insufficient_data = bool(
+            args.allow_insufficient_data
+            or (source_spec or {}).get("allow_insufficient_data", False)
+        )
+        exit_code = 0 if not insufficient or allow_insufficient_data else 2
         outcome = "insufficient_data" if insufficient else "ok"
-        store.complete(run_id, exit_code, outcome)
+        store.complete(run_id, exit_code, outcome, attempt_id=attempt_id)
         print(json.dumps({
             "status": "ok",
             "outcome": outcome,
@@ -138,9 +176,19 @@ def run_backtest_command(args):
             "exit_code": exit_code,
         }, ensure_ascii=False, indent=2))
         return exit_code
+    except KeyboardInterrupt:
+        store.interrupt(
+            run_id, "BACKTEST_USER_INTERRUPTED", "用户中断回测", exit_code=130,
+            attempt_id=attempt_id,
+        )
+        print(json.dumps({
+            "status": "interrupted", "error_code": "BACKTEST_USER_INTERRUPTED",
+            "message": "用户中断回测", "run_id": run_id,
+        }, ensure_ascii=False), file=sys.stderr)
+        return 130
     except Exception as exc:
         code = exc.code if isinstance(exc, BacktestError) else "BACKTEST_FAILED"
-        store.fail(run_id, code, str(exc))
+        store.fail(run_id, code, str(exc), attempt_id=attempt_id)
         print(json.dumps({
             "status": "error", "error_code": code,
             "message": str(exc), "run_id": run_id,
@@ -186,11 +234,14 @@ def build_parser():
     source = backtest_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--database")
     source.add_argument("--fixture")
+    source.add_argument("--resume")
     backtest_parser.add_argument("--as-of")
     backtest_parser.add_argument("--dataset-batch-id")
     backtest_parser.add_argument("--run-id")
     backtest_parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     backtest_parser.add_argument("--allow-insufficient-data", action="store_true")
+    backtest_parser.add_argument("--research-only", action="store_true")
+    backtest_parser.add_argument("--attempt-id", help=argparse.SUPPRESS)
     backtest_parser.set_defaults(handler=run_backtest_command)
     for name, handler in (("report", report_command), ("admission", admission_command)):
         child = subparsers.add_parser(name)

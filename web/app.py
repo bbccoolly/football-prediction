@@ -832,8 +832,57 @@ def _public_backtest_status(status):
         for key in (
             "run_id", "state", "outcome", "queued_at", "started_at",
             "heartbeat_at", "finished_at", "exit_code", "progress", "error",
+            "resumable", "resumed_at",
         )
     }
+
+
+@app.route("/api/calibration/datasets")
+def api_calibration_datasets():
+    try:
+        _ensure_runtime_components()
+        batches = []
+        from data.football_data import DIVISIONS, SEASONS
+        evaluation_as_of = datetime.now(timezone.utc).isoformat()
+        for row in _repository.list_dataset_batches():
+            manifest = row.get("manifest") or {}
+            files = manifest.get("files") or []
+            competitions = sorted({
+                DIVISIONS.get(item.get("division"), item.get("division"))
+                for item in files if item.get("division")
+            })
+            seasons = sorted({
+                SEASONS.get(item.get("season_code"), item.get("season_code"))
+                for item in files if item.get("season_code")
+            })
+            try:
+                readiness_report = _repository.build_data_readiness_report(
+                    batch_id=row["batch_id"], evaluation_as_of=evaluation_as_of
+                )
+                readiness = readiness_report.get("status", "not_ready")
+            except Exception:
+                readiness = "not_ready"
+            batches.append({
+                "batch_id": row["batch_id"], "source": row["source"],
+                "fetched_at": row["fetched_at"], "created_at": row["created_at"],
+                "member_count": row.get("member_count", 0),
+                "expected_member_count": row.get("expected_member_count", 0),
+                "membership_status": row.get("membership_status"),
+                "competitions": competitions, "seasons": seasons,
+                "range": {
+                    "first_season": seasons[0] if seasons else None,
+                    "last_season": seasons[-1] if seasons else None,
+                },
+                "quality_status": readiness,
+                "readiness": readiness,
+                "formal_eligible": (
+                    row.get("membership_status") == "complete"
+                    and readiness == "ready"
+                ),
+            })
+        return jsonify({"status": "ok", "datasets": batches})
+    except Exception:
+        return _api_error("回测数据集不可用", "BACKTEST_DATASETS_UNAVAILABLE", 503)
 
 
 def _backtest_report_response(completed_only=False):
@@ -878,24 +927,51 @@ def calibrate_page():
 @_admin_required
 def api_calibrate_run():
     _recover_backtest_tasks()
-    run_id = create_run_id()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return _api_error("请求体必须是 JSON 对象", "INVALID_JSON", 400)
+    resume_run_id = str(payload.get("resume_run_id") or "").strip()
+    if resume_run_id:
+        if set(payload) != {"resume_run_id"}:
+            return _api_error(
+                "恢复请求不能修改运行规格", "BACKTEST_SPEC_MISMATCH", 400
+            )
+        if not _BACKTEST_RUN_ID.fullmatch(resume_run_id):
+            return _api_error("run_id 格式无效", "INVALID_BACKTEST_RUN_ID", 400)
+        run_id = resume_run_id
+    else:
+        allowed = {"dataset_batch_id", "as_of", "research_only"}
+        if set(payload) - allowed:
+            return _api_error("包含不支持的回测参数", "BACKTEST_SPEC_MISMATCH", 400)
+        run_id = create_run_id()
     try:
-        _backtest_store.reserve(run_id)
+        reservation = _backtest_store.reserve(run_id, resume=bool(resume_run_id))
     except BacktestAlreadyRunningError as exc:
         return _api_error(
             "已有回测任务正在运行", "BACKTEST_ALREADY_RUNNING", 409,
             {"run_id": exc.run_id},
         )
+    except Exception as exc:
+        code = getattr(exc, "code", "BACKTEST_RESUME_NOT_ALLOWED")
+        return _api_error(str(exc), code, 409)
     run_dir = _backtest_store.run_dir(run_id)
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "calibrate_cli.py"),
-        "backtest",
-        "--database", _configured_database_path(),
-        "--as-of", datetime.now(timezone.utc).isoformat(),
-        "--run-id", run_id,
+    command = [sys.executable, str(PROJECT_ROOT / "calibrate_cli.py"), "backtest"]
+    if resume_run_id:
+        command.extend(["--resume", run_id])
+    else:
+        command.extend([
+            "--database", _configured_database_path(),
+            "--as-of", str(payload.get("as_of") or datetime.now(timezone.utc).isoformat()),
+            "--run-id", run_id,
+        ])
+        if payload.get("dataset_batch_id"):
+            command.extend(["--dataset-batch-id", str(payload["dataset_batch_id"])])
+        if payload.get("research_only", True):
+            command.append("--research-only")
+    command.extend([
         "--output-root", str(_backtest_store.root),
-    ]
+        "--attempt-id", reservation["attempt_id"],
+    ])
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
         with (run_dir / "stdout.log").open("a", encoding="utf-8") as stdout_handle, (
@@ -915,9 +991,14 @@ def api_calibrate_run():
             process = subprocess.Popen(command, **popen_options)
         status = _backtest_store.read_status(run_id) or {}
         if status.get("state") in {"queued", "running"}:
-            _backtest_store.claim(run_id, process.pid)
+            _backtest_store.claim(
+                run_id, process.pid, attempt_id=reservation["attempt_id"]
+            )
     except Exception:
-        _backtest_store.fail(run_id, "BACKTEST_START_FAILED", "后台回测启动失败")
+        _backtest_store.fail(
+            run_id, "BACKTEST_START_FAILED", "后台回测启动失败",
+            attempt_id=reservation.get("attempt_id"),
+        )
         _backtest_store.release(run_id)
         return _api_error("后台回测启动失败", "BACKTEST_START_FAILED", 500)
     return jsonify({

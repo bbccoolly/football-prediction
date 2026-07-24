@@ -44,6 +44,7 @@
 - 已实现配对 Brier、Log Loss、RPS、ECE、命中率及分赛事 7 日块 Bootstrap。
 - 已生成可追踪代码、数据、参数和快照的研究报告与模型准入清单。
 - Web 后台回测使用持久化 run ID、原子互斥、进程恢复和中断识别。
+- PR 6 已增加科研评分入口、批次历史视图、V3 原子检查点链、受限恢复和性能审计；完整结果通过 scoring fingerprint 校验。
 
 当前主要限制：
 
@@ -454,7 +455,7 @@ docs: 补充模型准入与回测规范
 
 ### 迭代 B：数据与回测
 
-详细实施步骤见 [迭代 B：预测收口、数据治理与可信回测实施方案](iteration-b-implementation-plan.md)。PR 1 至 PR 4 已完成当前阶段的实现与验收，PR 4 待提交审查。
+详细实施步骤见 [迭代 B：预测收口、数据治理与可信回测实施方案](iteration-b-implementation-plan.md) 及 [PR 6 科研回测性能与断点恢复方案](pr6-scientific-backtest-performance-plan.md)。PR 1 至 PR 5 已合入，PR 6 实现主体已完成，待全量数据性能和浏览器验收收尾。
 
 - 标准比赛结构和球队别名。
 - 数据去重和质量报告。

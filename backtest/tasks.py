@@ -5,16 +5,19 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
 from backtest.storage import atomic_write_json
+from backtest.contracts import BACKTEST_TASK_SCHEMA_VERSION, BacktestResumeNotAllowedError
 
 
 ACTIVE_STATES = {"queued", "running"}
 
 
 class BacktestAlreadyRunningError(RuntimeError):
+    code = "BACKTEST_ALREADY_RUNNING"
     def __init__(self, run_id):
         super().__init__("已有回测任务正在运行")
         self.run_id = run_id
@@ -85,10 +88,29 @@ class BacktestTaskStore:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def reserve(self, run_id):
+    def reserve(self, run_id, *, resume=False):
         self.root.mkdir(parents=True, exist_ok=True)
+        existing_status = self.read_status(run_id)
+        if resume:
+            error_code = (existing_status or {}).get("error", {}).get("code")
+            if (
+                not existing_status
+                or existing_status.get("state") != "interrupted"
+                or error_code not in {"BACKTEST_PROCESS_LOST", "BACKTEST_USER_INTERRUPTED"}
+            ):
+                raise BacktestResumeNotAllowedError("当前回测运行不允许恢复")
+        elif existing_status:
+            current = self._read_lock() or {}
+            if (
+                existing_status.get("state") == "queued"
+                and current.get("run_id") == run_id
+                and current.get("pid") is None
+            ):
+                return current
+            raise BacktestResumeNotAllowedError("run_id 已存在")
         payload = {
             "run_id": run_id,
+            "attempt_id": secrets.token_hex(16),
             "pid": None,
             "process_created_at": None,
             "reserved_at": utc_now(),
@@ -100,15 +122,15 @@ class BacktestTaskStore:
             )
         except FileExistsError:
             current = self._read_lock() or {}
-            if current.get("run_id") != run_id:
+            if current.get("run_id") != run_id or current.get("pid") is not None:
                 raise BacktestAlreadyRunningError(current.get("run_id"))
             return current
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        self.update_status(run_id, {
-            "schema_version": 1,
+        status_payload = {
+            "schema_version": BACKTEST_TASK_SCHEMA_VERSION,
             "run_id": run_id,
             "state": "queued",
             "outcome": None,
@@ -119,26 +141,35 @@ class BacktestTaskStore:
             "heartbeat_at": utc_now(),
             "finished_at": None,
             "exit_code": None,
+            "attempt_id": payload["attempt_id"],
+            "resumable": False,
             "progress": {
                 "phase": "queued", "current_batch": 0, "total_batches": 0,
                 "processed_matches": 0, "total_matches": 0, "percent": 0,
             },
             "error": None,
-        }, replace=True)
+        }
+        if resume:
+            status_payload["resumed_at"] = utc_now()
+            status_payload["previous_error"] = existing_status.get("error")
+        self.update_status(run_id, status_payload, replace=True)
         return payload
 
-    def claim(self, run_id, pid):
+    def claim(self, run_id, pid, attempt_id=None):
         current = self._read_lock()
         if current is None:
             self.reserve(run_id)
             current = self._read_lock()
         if current.get("run_id") != run_id:
             raise BacktestAlreadyRunningError(current.get("run_id"))
+        if attempt_id and current.get("attempt_id") != attempt_id:
+            raise BacktestAlreadyRunningError(current.get("run_id"))
         identity = process_identity(pid) or {"pid": pid, "created_at": None}
         lock = {
             **current,
             "pid": pid,
             "process_created_at": identity.get("created_at"),
+            "attempt_id": current.get("attempt_id"),
         }
         atomic_write_json(self.lock_path, lock)
         self.update_status(run_id, {
@@ -150,19 +181,23 @@ class BacktestTaskStore:
         })
         return lock
 
-    def update_status(self, run_id, changes, *, replace=False):
+    def update_status(self, run_id, changes, *, replace=False, attempt_id=None):
+        if attempt_id:
+            lock = self._read_lock() or {}
+            if lock.get("run_id") != run_id or lock.get("attempt_id") != attempt_id:
+                raise BacktestAlreadyRunningError(lock.get("run_id"))
         current = {} if replace else (self.read_status(run_id) or {})
         current.update(changes)
         atomic_write_json(self.status_path(run_id), current)
         return current
 
-    def update_progress(self, run_id, **progress):
+    def update_progress(self, run_id, attempt_id=None, **progress):
         return self.update_status(run_id, {
             "heartbeat_at": utc_now(),
             "progress": progress,
-        })
+        }, attempt_id=attempt_id)
 
-    def complete(self, run_id, exit_code, outcome):
+    def complete(self, run_id, exit_code, outcome, *, attempt_id=None):
         return self.update_status(run_id, {
             "state": "completed",
             "outcome": outcome,
@@ -170,9 +205,10 @@ class BacktestTaskStore:
             "finished_at": utc_now(),
             "exit_code": exit_code,
             "error": None,
-        })
+            "resumable": False,
+        }, attempt_id=attempt_id)
 
-    def fail(self, run_id, error_code, message, exit_code=1):
+    def fail(self, run_id, error_code, message, exit_code=1, *, attempt_id=None):
         return self.update_status(run_id, {
             "state": "failed",
             "outcome": "failed",
@@ -180,7 +216,21 @@ class BacktestTaskStore:
             "finished_at": utc_now(),
             "exit_code": exit_code,
             "error": {"code": error_code, "message": str(message)[:500]},
-        })
+            "resumable": False,
+        }, attempt_id=attempt_id)
+
+    def interrupt(self, run_id, error_code, message, exit_code=None, *, attempt_id=None):
+        if error_code not in {"BACKTEST_PROCESS_LOST", "BACKTEST_USER_INTERRUPTED"}:
+            raise ValueError("不支持的可恢复错误码")
+        return self.update_status(run_id, {
+            "state": "interrupted",
+            "outcome": "interrupted",
+            "heartbeat_at": utc_now(),
+            "finished_at": utc_now(),
+            "exit_code": exit_code,
+            "resumable": True,
+            "error": {"code": error_code, "message": str(message)[:500]},
+        }, attempt_id=attempt_id)
 
     def release(self, run_id):
         current = self._read_lock()
@@ -225,17 +275,9 @@ class BacktestTaskStore:
             if same_process and expected_created_at and identity.get("created_at"):
                 same_process = identity["created_at"] == expected_created_at
             if not same_process:
-                self.update_status(path.name, {
-                    "state": "interrupted",
-                    "outcome": "interrupted",
-                    "finished_at": utc_now(),
-                    "heartbeat_at": utc_now(),
-                    "exit_code": None,
-                    "error": {
-                        "code": "BACKTEST_INTERRUPTED",
-                        "message": "回测进程已不存在",
-                    },
-                })
+                self.interrupt(
+                    path.name, "BACKTEST_PROCESS_LOST", "回测进程已不存在"
+                )
                 self.release(path.name)
                 recovered.append(path.name)
         lock = self._read_lock()

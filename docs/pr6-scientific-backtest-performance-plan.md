@@ -1,6 +1,6 @@
 # PR 6：科研回测性能与断点恢复实施方案
 
-> 状态：已规划，尚未实施。前置条件是 PR 5（`codex/data-coverage-governance`）已推送、通过 CI 并合入 `origin/master`。PR 6 必须从该合入后的 `master` 创建独立分支，建议分支名为 `codex/backtest-performance`。
+> 状态：已实施主体，进入验收收尾。基线为 PR 5 合并提交 d6798ee，PR 6 方案提交为 75c072f，当前实现分支为 codex/backtest-performance。
 
 ## 1. 目标与边界
 
@@ -228,3 +228,23 @@ docs: 记录科研回测性能与恢复流程
 - 检查点和报告属于运行时数据，必须由 `.gitignore` 排除；测试使用临时目录。
 - 运行时构建失败、输入指纹不一致或恢复校验失败时不得覆盖已有检查点或报告。
 - 本 PR 不改变模型准入结论。数据覆盖和样本质量不足时，保持 `research_only` 或 `insufficient_data` 是预期且正确的结果。
+
+## 11. 实施记录与剩余验收
+
+已完成：
+
+- Schema V3 批次成员关系、幂等导入、批量赔率读取和不可变 BacktestHistoryView。
+- build_from_matches() 与 evaluate() 共享生产模型、特征和证据门禁；科研评分跳过派生模拟。
+- V3 run_spec、原子 segment、连续 checkpoint 哈希链、阶段指标、最终 manifest 提交标记和 scoring fingerprint。
+- 任务 attempt 锁、进程丢失/用户中断状态、受限恢复和输入/规格/检查点校验。
+- CLI 科研与恢复参数，Web 数据集发现、科研运行和恢复入口；公开响应不包含数据库绝对路径。
+- 自动化测试包含中断恢复与连续运行的 predictions、metrics、admission、结果指纹一致性验证。
+
+收尾验收：
+
+1. 已完成小型 fixture 科研模式 CLI 冒烟，生成 9 个检查点和 V3 manifest。
+2. 已使用 readiness=ready、成员完整的 10,707 场批次完成全量基准：时间外评分 4,275 场、444 个批次，总耗时 299.95 秒，峰值内存 369,545,216 字节，15 分钟目标达成。
+3. 已完成校准页面桌面与 390x844 移动视口检查：控件无横向溢出，科研模式默认开启，恢复按钮按 resumable 状态显示。
+4. 合入前仍需执行最终全量测试、编译检查和差异检查。
+
+正式数据库回测必须指定完整批次，并通过数据 readiness 门禁；不完整批次只能用于浏览或科研模式。V2 报告继续只读，不能作为 V3 恢复来源。

@@ -25,7 +25,7 @@ def test_parser_rejects_score_result_mismatch():
         parse_csv(invalid, season_code="2425", division="D1", observed_at="2026-01-01T00:00:00+00:00")
 
 
-def test_v1_database_migrates_to_v2(tmp_path):
+def test_v1_database_migrates_to_v3(tmp_path):
     database = tmp_path / "legacy.db"
     connection = sqlite3.connect(database)
     connection.executescript(SCHEMA_V1)
@@ -37,9 +37,12 @@ def test_v1_database_migrates_to_v2(tmp_path):
     repository.initialize()
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='historical_closing_odds'"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_batch_matches'"
         ).fetchone()
 
 
@@ -57,3 +60,5 @@ def test_batch_import_keeps_declared_odds_out_of_live_query(tmp_path):
     assert repository.list_latest_pre_match_odds(match["match_id"], "2026-01-01T00:00:00+00:00") == []
     rows = repository.list_backtest_odds(match["match_id"], "2024-08-24T00:00:00+00:00", manifest["batch_id"])
     assert rows[0]["evidence_type"] == "source_declared_closing"
+    assert repository.list_dataset_batch_matches(manifest["batch_id"])[0]["match_id"] == match["match_id"]
+    assert repository.get_dataset_batch(manifest["batch_id"])["membership_status"] == "complete"

@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-BACKTEST_SCHEMA_VERSION = 2
-BACKTEST_PROTOCOL_VERSION = "walk_forward_v2"
+BACKTEST_SCHEMA_VERSION = 3
+BACKTEST_PROTOCOL_VERSION = "walk_forward_v3_scientific_checkpoint"
+BACKTEST_TASK_SCHEMA_VERSION = 2
 DEFAULT_OUTPUT_ROOT = Path("data/processed/backtests")
 MODEL_BASELINES = (
     "expanding_competition_rate", "recent_100_competition_rate",
@@ -34,6 +35,22 @@ class BacktestDataError(BacktestError):
 
 class BacktestExecutionError(BacktestError):
     code = "BACKTEST_EXECUTION_FAILED"
+
+
+class BacktestResumeNotAllowedError(BacktestError):
+    code = "BACKTEST_RESUME_NOT_ALLOWED"
+
+
+class BacktestCheckpointError(BacktestError):
+    code = "BACKTEST_CHECKPOINT_INVALID"
+
+
+class BacktestInputChangedError(BacktestError):
+    code = "BACKTEST_INPUT_CHANGED"
+
+
+class BacktestSpecMismatchError(BacktestError):
+    code = "BACKTEST_SPEC_MISMATCH"
 
 
 def utc_iso(value: datetime | str) -> str:
@@ -64,6 +81,7 @@ class BacktestConfig:
     minimum_coverage: float = 0.95
     minimum_log_loss_improvement: float = 0.005
     maximum_ece_increase: float = 0.02
+    research_only: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "as_of", utc_iso(self.as_of))

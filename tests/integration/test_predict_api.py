@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import time
@@ -366,6 +367,8 @@ def test_calibration_run_starts_persistent_background_task(client, monkeypatch, 
     assert response.status_code == 202
     assert response.get_json()["run_id"] == "bt-web-first"
     assert calls[0][1]["shell"] is False
+    assert "--research-only" in calls[0][0]
+    assert "--attempt-id" in calls[0][0]
     assert store.read_status("bt-web-first")["state"] == "running"
 
     conflict = client.post(
@@ -375,6 +378,75 @@ def test_calibration_run_starts_persistent_background_task(client, monkeypatch, 
 
     assert conflict.status_code == 409
     assert conflict.get_json()["error_code"] == "BACKTEST_ALREADY_RUNNING"
+
+
+def test_calibration_resume_rejects_spec_changes_and_uses_original_run(
+    client, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    store = BacktestTaskStore(tmp_path / "backtests")
+    monkeypatch.setattr(web_app, "_backtest_store", store)
+    run_id = "bt-interrupted"
+    store.reserve(run_id)
+    store.interrupt(
+        run_id, "BACKTEST_USER_INTERRUPTED", "用户中断", exit_code=130
+    )
+    store.release(run_id)
+    calls = []
+
+    class Process:
+        pid = os.getpid()
+
+    monkeypatch.setattr(
+        web_app.subprocess, "Popen",
+        lambda command, **options: calls.append(command) or Process(),
+    )
+    invalid = client.post(
+        "/api/calibrate/run",
+        json={"resume_run_id": run_id, "research_only": True},
+        headers={"Authorization": "Bearer expected-token"},
+    )
+    assert invalid.status_code == 400
+    assert invalid.get_json()["error_code"] == "BACKTEST_SPEC_MISMATCH"
+
+    response = client.post(
+        "/api/calibrate/run",
+        json={"resume_run_id": run_id},
+        headers={"Authorization": "Bearer expected-token"},
+    )
+    assert response.status_code == 202
+    assert calls[0][calls[0].index("--resume") + 1] == run_id
+    assert "--database" not in calls[0]
+    assert "--attempt-id" in calls[0]
+
+
+def test_calibration_datasets_are_public_and_do_not_expose_paths(
+    client, monkeypatch
+):
+    monkeypatch.setattr(web_app, "_ensure_runtime_components", lambda: None)
+    monkeypatch.setattr(web_app._repository, "list_dataset_batches", lambda: [{
+        "batch_id": "fd-example", "source": "football-data.co.uk",
+        "fetched_at": "2026-01-01T00:00:00+00:00",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "member_count": 1200, "expected_member_count": 1200,
+        "membership_status": "complete",
+        "manifest": {
+            "files": [{"division": "D1", "season_code": "2425"}],
+            "internal_path": "D:/secret/data.csv",
+        },
+    }])
+    monkeypatch.setattr(
+        web_app._repository, "build_data_readiness_report",
+        lambda **_kwargs: {"status": "ready"},
+    )
+
+    response = client.get("/api/calibration/datasets")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["datasets"][0]["formal_eligible"] is True
+    assert "manifest" not in payload["datasets"][0]
+    assert "path" not in json.dumps(payload)
 
 
 def test_completed_backtest_report_is_loaded_by_run_id(client, monkeypatch, tmp_path):
