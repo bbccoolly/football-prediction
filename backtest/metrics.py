@@ -84,37 +84,116 @@ def bootstrap_comparison(records, model_id, baseline_id, iterations=2000, seed=4
     if total_blocks < 2:
         return None
     rng = np.random.default_rng(seed)
-    model_samples = {name: [] for name in METRIC_NAMES}
-    baseline_samples = {name: [] for name in METRIC_NAMES}
-    delta_samples = {name: [] for name in METRIC_NAMES}
-    for _ in range(iterations):
-        sampled = []
-        for competition_id in sorted(blocks_by_competition):
-            blocks = blocks_by_competition[competition_id]
-            keys = sorted(blocks)
-            choices = rng.integers(0, len(keys), size=len(keys))
-            for choice in choices:
-                sampled.extend(blocks[keys[int(choice)]])
-        model_metrics = metric_values([
-            (record["actual"], record["predictions"][model_id]) for record in sampled
-        ])
-        baseline_metrics = metric_values([
-            (record["actual"], record["predictions"][baseline_id]) for record in sampled
-        ])
-        for metric_name in METRIC_NAMES:
-            model_value = model_metrics[metric_name]
-            baseline_value = baseline_metrics[metric_name]
-            model_samples[metric_name].append(model_value)
-            baseline_samples[metric_name].append(baseline_value)
-            delta_samples[metric_name].append(model_value - baseline_value)
+    grouped_components = []
+    # Draw in the same iteration/competition order as the previous implementation,
+    # then aggregate immutable block statistics with NumPy instead of rescoring rows.
+    choices_by_competition = []
+    for competition_id in sorted(blocks_by_competition):
+        blocks = blocks_by_competition[competition_id]
+        keys = sorted(blocks)
+        choices_by_competition.append(np.empty((iterations, len(keys)), dtype=np.int64))
+    for iteration in range(iterations):
+        for index, competition_id in enumerate(sorted(blocks_by_competition)):
+            block_count = choices_by_competition[index].shape[1]
+            choices_by_competition[index][iteration] = rng.integers(
+                0, block_count, size=block_count
+            )
+    for competition_id in sorted(blocks_by_competition):
+        blocks = blocks_by_competition[competition_id]
+        keys = sorted(blocks)
+        grouped_components.append((
+            _bootstrap_block_components([blocks[key] for key in keys], model_id),
+            _bootstrap_block_components([blocks[key] for key in keys], baseline_id),
+        ))
+
+    model_samples = {name: np.zeros(iterations, dtype=float) for name in METRIC_NAMES}
+    baseline_samples = {name: np.zeros(iterations, dtype=float) for name in METRIC_NAMES}
+    for components, choices in zip(grouped_components, choices_by_competition):
+        for target, sample in ((model_samples, components[0]), (baseline_samples, components[1])):
+            for metric_name in ("brier", "log_loss", "rps", "correct", "count"):
+                target[metric_name] = target.get(metric_name, np.zeros(iterations)) + np.take(
+                    sample[metric_name], choices
+                ).sum(axis=1)
+            for bucket in range(10):
+                for prefix in ("bucket", "bucket_correct", "bucket_confidence"):
+                    key = f"{prefix}_{bucket}"
+                    target[key] = target.get(key, np.zeros(iterations)) + np.take(
+                        sample[key], choices
+                    ).sum(axis=1)
+    for target in (model_samples, baseline_samples):
+        count = np.maximum(target.pop("count"), 1.0)
+        target["brier"] /= count
+        target["log_loss"] /= count
+        target["rps"] /= count
+        target["accuracy"] = target.pop("correct") / count
+        ece = np.zeros(iterations, dtype=float)
+        for bucket in range(10):
+            bucket_count = target.pop(f"bucket_{bucket}")
+            bucket_correct = target.pop(f"bucket_correct_{bucket}", None)
+            bucket_confidence = target.pop(f"bucket_confidence_{bucket}", None)
+            if bucket_correct is not None and bucket_confidence is not None:
+                ece += bucket_count / count * np.abs(
+                    bucket_correct / np.maximum(bucket_count, 1.0)
+                    - bucket_confidence / np.maximum(bucket_count, 1.0)
+                )
+        target["ece"] = ece
+    delta_samples = {
+        name: model_samples[name] - baseline_samples[name] for name in METRIC_NAMES
+    }
     return {
         "iterations": iterations,
         "seed": seed,
         "block_count": total_blocks,
-        "model": {name: _percentile_summary(values) for name, values in model_samples.items()},
-        "baseline": {name: _percentile_summary(values) for name, values in baseline_samples.items()},
-        "delta": {name: _percentile_summary(values) for name, values in delta_samples.items()},
+        "model": {name: _percentile_summary(model_samples[name]) for name in METRIC_NAMES},
+        "baseline": {name: _percentile_summary(baseline_samples[name]) for name in METRIC_NAMES},
+        "delta": {name: _percentile_summary(delta_samples[name]) for name in METRIC_NAMES},
     }
+
+
+def _bootstrap_block_components(blocks, model_id):
+    values = {
+        name: np.zeros(len(blocks), dtype=float)
+        for name in ("brier", "log_loss", "rps", "correct", "count")
+    }
+    values.update({
+        f"bucket_{bucket}": np.zeros(len(blocks), dtype=float)
+        for bucket in range(10)
+    })
+    values.update({
+        f"bucket_correct_{bucket}": np.zeros(len(blocks), dtype=float)
+        for bucket in range(10)
+    })
+    values.update({
+        f"bucket_confidence_{bucket}": np.zeros(len(blocks), dtype=float)
+        for bucket in range(10)
+    })
+    for block_index, block in enumerate(blocks):
+        for record in block:
+            prediction = record["predictions"][model_id]
+            probabilities = np.asarray(
+                [prediction[key] for key in OUTCOMES], dtype=float
+            )
+            actual_index = OUTCOMES.index(record["actual"])
+            target = np.zeros(3, dtype=float)
+            target[actual_index] = 1.0
+            confidence = float(probabilities[np.argmax(probabilities)])
+            bucket = min(int(confidence * 10), 9)
+            values["brier"][block_index] += np.square(probabilities - target).sum()
+            values["log_loss"][block_index] -= math.log(
+                max(1e-15, min(1.0, probabilities[actual_index]))
+            )
+            values["rps"][block_index] += (
+                np.square(np.cumsum(probabilities)[:2] - np.cumsum(target)[:2]).sum()
+                / 2
+            )
+            values["correct"][block_index] += float(np.argmax(probabilities) == actual_index)
+            values["count"][block_index] += 1
+            values[f"bucket_{bucket}"][block_index] += 1
+            values[f"bucket_correct_{bucket}"][block_index] += float(
+                np.argmax(probabilities) == actual_index
+            )
+            values[f"bucket_confidence_{bucket}"][block_index] += confidence
+    return values
 
 
 def evaluate_model(

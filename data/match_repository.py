@@ -374,6 +374,13 @@ class MatchRepository:
                 ).fetchone()
                 if row is None:
                     raise RepositoryError("已导入来源记录未关联标准比赛")
+                connection.execute(
+                    """INSERT INTO dataset_batch_matches(batch_id, source_record_pk, match_id)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(batch_id, source_record_pk) DO UPDATE SET
+                           match_id=excluded.match_id""",
+                    (manifest["batch_id"], source_pk, row["match_id"]),
+                )
                 for odds in imported.closing_odds:
                     closing_id = stable_id(
                         "historical-closing-odds",
@@ -395,6 +402,22 @@ class MatchRepository:
                         ),
                     )
                     counts["closing_odds"] += 1
+            expected_members = counts["fetched"] - counts["rejected"] - counts["unmatched"]
+            member_count = connection.execute(
+                "SELECT COUNT(*) FROM dataset_batch_matches WHERE batch_id=?",
+                (manifest["batch_id"],),
+            ).fetchone()[0]
+            connection.execute(
+                """UPDATE dataset_batches
+                   SET member_count=?, expected_member_count=?, membership_status=?
+                   WHERE batch_id=?""",
+                (
+                    member_count,
+                    expected_members,
+                    "complete" if member_count == expected_members else "membership_incomplete",
+                    manifest["batch_id"],
+                ),
+            )
             connection.execute(
                 """UPDATE sync_runs SET finished_at=?, fetched_count=?, inserted_count=?,
                    updated_count=?, skipped_count=?, rejected_count=?, unmatched_count=?, status='completed'
@@ -1044,6 +1067,103 @@ class MatchRepository:
             if self.database_path != ":memory:":
                 connection.close()
 
+    def list_dataset_batches(self):
+        connection = self._connection()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM dataset_batches ORDER BY created_at DESC, batch_id"
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["manifest"] = json.loads(item.pop("manifest_json"))
+                except (TypeError, json.JSONDecodeError):
+                    item["manifest"] = None
+                    item["membership_status"] = "membership_incomplete"
+                result.append(item)
+            return result
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def list_dataset_batch_matches(self, batch_id: str, as_of: str | None = None):
+        connection = self._connection()
+        try:
+            rows = connection.execute(
+                "SELECT DISTINCT match_id FROM dataset_batch_matches WHERE batch_id=?",
+                (batch_id,),
+            ).fetchall()
+            member_ids = {row[0] for row in rows}
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+        if not member_ids:
+            return []
+        return [
+            match for match in self.list_matches(as_of=as_of)
+            if match["match_id"] in member_ids
+        ]
+
+    def list_backtest_odds_bulk(
+        self,
+        match_cutoffs: Mapping[str, str],
+        dataset_batch_id: str | None = None,
+    ):
+        if not match_cutoffs:
+            return {}
+        normalized = {
+            str(match_id): normalize_timestamp(cutoff)
+            for match_id, cutoff in match_cutoffs.items()
+        }
+        selected = {match_id: [] for match_id in normalized}
+        match_ids = sorted(normalized)
+        connection = self._connection()
+        try:
+            for offset in range(0, len(match_ids), 400):
+                chunk = match_ids[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""SELECT * FROM odds_snapshots
+                        WHERE match_id IN ({placeholders})
+                        ORDER BY match_id, company, captured_at DESC, odds_snapshot_id""",
+                    chunk,
+                ).fetchall()
+                companies = set()
+                for raw in rows:
+                    row = dict(raw)
+                    key = (row["match_id"], row["company"])
+                    if key in companies or row["captured_at"] >= normalized[row["match_id"]]:
+                        continue
+                    companies.add(key)
+                    row["evidence_type"] = "captured_at"
+                    selected[row["match_id"]].append(row)
+                if dataset_batch_id:
+                    rows = connection.execute(
+                        f"""SELECT closing_odds_id AS odds_snapshot_id, match_id, company,
+                                   home_odds, draw_odds, away_odds, evidence_type, observed_at,
+                                   source_file_sha256, source_record_pk, batch_id
+                            FROM historical_closing_odds
+                            WHERE batch_id=? AND match_id IN ({placeholders})
+                            ORDER BY match_id, company, closing_odds_id""",
+                        [dataset_batch_id, *chunk],
+                    ).fetchall()
+                    strict = {
+                        (match_id, row["company"])
+                        for match_id, values in selected.items()
+                        for row in values
+                    }
+                    for raw in rows:
+                        row = dict(raw)
+                        if (row["match_id"], row["company"]) not in strict:
+                            selected[row["match_id"]].append(row)
+            for values in selected.values():
+                values.sort(key=lambda row: (row["company"], row["odds_snapshot_id"]))
+            return selected
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
     def build_data_readiness_report(self, *, batch_id: str, evaluation_as_of: str):
         """Evaluate formal data gates without initializing prediction models."""
         batch = self.get_dataset_batch(batch_id)
@@ -1057,10 +1177,9 @@ class MatchRepository:
         scoped_names = {DIVISIONS[item["division"]] for item in manifest["files"]}
         scoped_competitions = {_competition_id(name) for name in scoped_names}
         config = BacktestConfig(as_of=evaluation_as_of)
-        scoped_matches = [
-            match for match in self.list_matches()
-            if match["competition_id"] in scoped_competitions
-        ]
+        scoped_matches = self.list_dataset_batch_matches(
+            batch_id, as_of=config.as_of
+        )
         accepted, excluded = filter_eligible_matches(scoped_matches, config)
         partitions = split_by_natural_day(accepted, config)
         accepted_ids = {match["match_id"] for match in accepted}
@@ -1100,6 +1219,7 @@ class MatchRepository:
             for key, (total, covered) in sorted(coverage_by_scope.items())
         }
         requirements = {
+            "complete_batch_membership": batch.get("membership_status") == "complete",
             "complete_source_matrix": len(manifest["files"]) == 30 and len(scoped_competitions) == 5,
             "minimum_formal_matches": len(accepted) >= config.minimum_formal_matches,
             "minimum_holdout_matches": len(partitions.holdout) >= config.minimum_holdout_matches,

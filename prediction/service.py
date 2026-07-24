@@ -150,6 +150,20 @@ class PredictionService:
         return OddsSnapshot(*values, captured_at=captured_at, source="manual")
 
     def predict(self, request, include_trace=False, progress=None):
+        return self._predict_core(
+            request, include_trace=include_trace,
+            include_derived=True, progress=progress,
+        )
+
+    def evaluate(self, request, progress=None):
+        return self._predict_core(
+            request, include_trace=False,
+            include_derived=False, progress=progress,
+        )
+
+    def _predict_core(
+        self, request, *, include_trace=False, include_derived=True, progress=None
+    ):
         if not isinstance(request, PredictionRequest):
             raise InvalidPredictionRequestError("请求类型无效")
         snapshot = self.runtime_manager.current()
@@ -255,16 +269,27 @@ class PredictionService:
             ensemble = bma.blend(predictions)
         except NoAvailableModelsError:
             raise
-        simulation = MonteCarloModel().simulate([ensemble], [1.0])
-        simulation.update({"role": "derived", "source": "ensemble"})
-        predictions["monte_carlo"] = normalize_prediction("monte_carlo", {
-            **simulation,
-            "available": False,
-            "status": "derived",
-            "role": "derived",
-            "warnings": ["derived_output"],
-        })
-        progress(12, "蒙特卡洛模拟")
+        if include_derived:
+            simulation = MonteCarloModel().simulate([ensemble], [1.0])
+            simulation.update({"role": "derived", "source": "ensemble"})
+            predictions["monte_carlo"] = normalize_prediction("monte_carlo", {
+                **simulation,
+                "available": False,
+                "status": "derived",
+                "role": "derived",
+                "warnings": ["derived_output"],
+            })
+            progress(12, "蒙特卡洛模拟")
+        else:
+            predictions["monte_carlo"] = {
+                "model": "monte_carlo", "available": False,
+                "status": "not_evaluated", "reason": "scientific_scoring_mode",
+                "role": "derived", "warnings": ["scientific_scoring_mode"],
+            }
+            simulation = {
+                "status": "not_evaluated", "reason": "scientific_scoring_mode",
+                "role": "derived", "source": "ensemble",
+            }
 
         independent = {
             key: value for key, value in predictions.items() if key != "monte_carlo"
@@ -287,14 +312,21 @@ class PredictionService:
             "using_defaults_models": 0,
         }
         poisson_ready = predictions["poisson"].get("available") and scoped
-        htft = (
-            scoped.models["poisson"].predict_htft(home_name, away_name, request.neutral)
-            if poisson_ready else {"status": "insufficient_evidence"}
-        )
-        handicap = (
-            scoped.models["poisson"].predict_handicap(home_name, away_name, request.neutral)
-            if poisson_ready else {"status": "insufficient_evidence"}
-        )
+        if include_derived:
+            htft = (
+                scoped.models["poisson"].predict_htft(home_name, away_name, request.neutral)
+                if poisson_ready else {"status": "insufficient_evidence"}
+            )
+            handicap = (
+                scoped.models["poisson"].predict_handicap(home_name, away_name, request.neutral)
+                if poisson_ready else {"status": "insufficient_evidence"}
+            )
+        else:
+            htft = {
+                "status": "not_evaluated", "reason": "scientific_scoring_mode",
+                "role": "derived",
+            }
+            handicap = dict(htft)
         trace = None
         if include_trace:
             trace = {

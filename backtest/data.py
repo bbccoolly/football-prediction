@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -33,6 +34,112 @@ class DataPartitions:
             "training_end_date": self.training_end_date,
             "validation_end_date": self.validation_end_date,
         }
+
+
+@dataclass(frozen=True)
+class BacktestHistoryView:
+    matches: tuple[dict, ...]
+    accepted: tuple[dict, ...]
+    excluded: dict
+    partitions: DataPartitions
+    market_inputs: dict
+    odds_inventory: tuple[dict, ...]
+    batch_specs: tuple[tuple[str, dict], ...]
+    source_matches_fingerprint: str
+    accepted_matches_fingerprint: str
+    odds_fingerprint: str
+    membership_fingerprint: str
+    run_input_fingerprint: str
+    dataset: dict | None
+    _training_keys: tuple[str, ...]
+
+    @classmethod
+    def load(cls, repository, config):
+        dataset = None
+        if config.dataset_batch_id:
+            dataset = repository.get_dataset_batch(config.dataset_batch_id)
+            if dataset is None:
+                raise BacktestDataError("数据 batch 不存在")
+            matches = repository.list_dataset_batch_matches(
+                config.dataset_batch_id, as_of=config.as_of
+            )
+        else:
+            matches = repository.list_matches(as_of=config.as_of)
+        accepted, excluded = filter_eligible_matches(matches, config)
+        partitions = split_by_natural_day(accepted, config)
+        cutoffs = {
+            match["match_id"]: (
+                normalize_timestamp(match["kickoff_utc"])
+                if match["time_precision"] == "minute"
+                else f"{match['event_date']}T00:00:00+00:00"
+            )
+            for match in accepted
+        }
+        odds_by_match = repository.list_backtest_odds_bulk(
+            cutoffs, config.dataset_batch_id
+        )
+        market_inputs = {
+            match_id: market_consensus(rows)
+            for match_id, rows in odds_by_match.items()
+        }
+        odds_inventory = tuple(
+            {
+                key: row.get(key)
+                for key in (
+                    "odds_snapshot_id", "match_id", "company", "captured_at",
+                    "home_odds", "draw_odds", "away_odds", "source",
+                    "evidence_type", "source_file_sha256", "source_record_pk",
+                    "batch_id",
+                )
+            }
+            for match_id in sorted(odds_by_match)
+            for row in odds_by_match[match_id]
+        )
+        batch_specs = []
+        for partition_name, values in (
+            ("validation", partitions.validation), ("holdout", partitions.holdout)
+        ):
+            for batch in walk_forward_batches(values, prefix=partition_name):
+                batch_specs.append((partition_name, batch))
+        source_fp = accepted_data_fingerprint(matches, {})
+        accepted_fp = accepted_data_fingerprint(accepted, excluded)
+        odds_fp = fingerprint(odds_inventory)
+        membership_fp = fingerprint([
+            match["match_id"] for match in matches
+        ])
+        input_fp = fingerprint({
+            "dataset_batch_id": config.dataset_batch_id,
+            "as_of": config.as_of,
+            "source_matches": source_fp,
+            "accepted_matches": accepted_fp,
+            "odds": odds_fp,
+            "membership": membership_fp,
+        })
+        training_keys = tuple(_training_key(match) for match in accepted)
+        return cls(
+            matches=tuple(matches), accepted=tuple(accepted), excluded=excluded,
+            partitions=partitions, market_inputs=market_inputs,
+            odds_inventory=odds_inventory, batch_specs=tuple(batch_specs),
+            source_matches_fingerprint=source_fp,
+            accepted_matches_fingerprint=accepted_fp,
+            odds_fingerprint=odds_fp, membership_fingerprint=membership_fp,
+            run_input_fingerprint=input_fp, dataset=dict(dataset) if dataset else None,
+            _training_keys=training_keys,
+        )
+
+    def history_before(self, cutoff):
+        normalized = normalize_timestamp(cutoff)
+        return self.accepted[:bisect_left(self._training_keys, normalized)]
+
+    @property
+    def membership_complete(self):
+        return not self.dataset or self.dataset.get("membership_status") == "complete"
+
+
+def _training_key(match):
+    if match["time_precision"] == "minute":
+        return normalize_timestamp(match["kickoff_utc"])
+    return f"{match['event_date']}T00:00:00+00:00"
 
 
 def _match_sort_key(match):
@@ -132,7 +239,7 @@ def split_by_natural_day(matches, config: BacktestConfig):
     )
 
 
-def walk_forward_batches(matches):
+def walk_forward_batches(matches, prefix=None):
     date_only_days = {
         match["event_date"] for match in matches if match["time_precision"] == "date"
     }
@@ -153,7 +260,7 @@ def walk_forward_batches(matches):
         else:
             cutoff = key[1]
         result.append({
-            "batch_id": f"batch-{index:05d}",
+            "batch_id": f"{prefix + '-' if prefix else ''}batch-{index:05d}",
             "cutoff": cutoff,
             "matches": batch,
         })

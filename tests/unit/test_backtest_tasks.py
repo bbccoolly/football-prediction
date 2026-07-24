@@ -38,5 +38,22 @@ def test_recovery_marks_missing_process_as_interrupted(tmp_path, monkeypatch):
     recovered = store.recover()
 
     assert recovered == ["bt-interrupted"]
-    assert store.read_status("bt-interrupted")["state"] == "interrupted"
+    status = store.read_status("bt-interrupted")
+    assert status["state"] == "interrupted"
+    assert status["error"]["code"] == "BACKTEST_PROCESS_LOST"
+    assert status["resumable"] is True
     assert not store.lock_path.exists()
+
+
+def test_only_interrupted_runs_with_stable_codes_can_resume(tmp_path):
+    store = BacktestTaskStore(tmp_path)
+    store.reserve("bt-resume")
+    store.interrupt(
+        "bt-resume", "BACKTEST_USER_INTERRUPTED", "用户中断", exit_code=130
+    )
+    store.release("bt-resume")
+
+    reservation = store.reserve("bt-resume", resume=True)
+
+    assert reservation["attempt_id"]
+    assert store.read_status("bt-resume")["state"] == "queued"

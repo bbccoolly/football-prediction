@@ -82,6 +82,23 @@ def _match_time(match):
     return str(match.get("kickoff_utc") or match.get("event_date") or match.get("date") or "")
 
 
+def _training_data_fingerprint(matches):
+    return fingerprint([{
+        key: match.get(key)
+        for key in (
+            "match_id", "competition_id", "event_date", "kickoff_utc",
+            "time_precision", "home_team_id", "away_team_id", "neutral",
+            "status", "home_goals", "away_goals",
+        )
+    } for match in matches])
+
+
+def _before_cutoff(match, cutoff):
+    if match.get("kickoff_utc"):
+        return normalize_timestamp(match["kickoff_utc"]) < cutoff
+    return str(match.get("event_date") or "") < cutoff[:10]
+
+
 def _team_counts(matches):
     counts = Counter()
     for match in matches:
@@ -284,6 +301,27 @@ class ModelRuntimeBuilder:
             "status": "finished", "data_quality_status": "valid",
         }
         matches = self.repository.list_matches(training_filters, as_of=cutoff)
+        data_fingerprint = self.repository.build_data_fingerprint(
+            training_filters, as_of=cutoff
+        )
+        return self._build_snapshot(matches, cutoff, data_fingerprint)
+
+    def build_from_matches(self, matches, as_of: datetime | str) -> ModelRuntimeSnapshot:
+        cutoff = _iso(as_of)
+        scoped = [
+            dict(match) for match in matches
+            if match.get("status") == "finished"
+            and match.get("data_quality_status", "valid") == "valid"
+            and _before_cutoff(match, cutoff)
+        ]
+        scoped.sort(key=lambda match: (
+            match["event_date"], match.get("kickoff_utc") or "", match["match_id"]
+        ))
+        return self._build_snapshot(
+            scoped, cutoff, _training_data_fingerprint(scoped)
+        )
+
+    def _build_snapshot(self, matches, cutoff, data_fingerprint):
         valid = [
             match for match in matches
             if match.get("home_team_type") == match.get("away_team_type")
@@ -292,9 +330,6 @@ class ModelRuntimeBuilder:
         if not valid:
             raise RuntimeNotReadyError("预测运行时没有可用的完场比赛")
 
-        data_fingerprint = self.repository.build_data_fingerprint(
-            training_filters, as_of=cutoff
-        )
         team_type_models = self._build_team_type_models(valid)
         competition_models = self._build_competition_models(valid)
         weights = dict(INITIAL_WEIGHTS)

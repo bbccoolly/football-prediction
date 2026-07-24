@@ -1,3 +1,7 @@
+from collections import defaultdict
+from datetime import date
+
+import numpy as np
 import pytest
 
 from backtest.admission import build_admission
@@ -36,6 +40,52 @@ def test_stratified_block_bootstrap_is_deterministic():
 
     assert first == second
     assert first["block_count"] == 3
+
+
+def test_vectorized_bootstrap_matches_row_by_row_protocol():
+    records = []
+    for competition in ("league-a", "league-b"):
+        for index, day in enumerate(("2025-01-01", "2025-01-10", "2025-01-20")):
+            records.append({
+                "actual": ("home_win", "draw", "away_win")[index],
+                "match": {"event_date": day, "competition_id": competition},
+                "predictions": {
+                    "model": _prediction(0.55, 0.25, 0.20),
+                    "baseline": _prediction(0.40, 0.30, 0.30),
+                },
+            })
+    iterations = 25
+    optimized = bootstrap_comparison(
+        records, "model", "baseline", iterations=iterations, seed=42
+    )
+    anchor = min(date.fromisoformat(row["match"]["event_date"]) for row in records)
+    grouped = defaultdict(lambda: defaultdict(list))
+    for row in records:
+        block = (date.fromisoformat(row["match"]["event_date"]) - anchor).days // 7
+        grouped[row["match"]["competition_id"]][block].append(row)
+    rng = np.random.default_rng(42)
+    samples = {"model": defaultdict(list), "baseline": defaultdict(list)}
+    for _ in range(iterations):
+        sampled = []
+        for competition in sorted(grouped):
+            blocks = grouped[competition]
+            keys = sorted(blocks)
+            for choice in rng.integers(0, len(keys), size=len(keys)):
+                sampled.extend(blocks[keys[int(choice)]])
+        for model_id in ("model", "baseline"):
+            metrics = metric_values([
+                (row["actual"], row["predictions"][model_id]) for row in sampled
+            ])
+            for name, value in metrics.items():
+                samples[model_id][name].append(value)
+    for model_id in ("model", "baseline"):
+        for metric_name, values in samples[model_id].items():
+            expected = {
+                "mean": np.mean(values),
+                "lower_95": np.percentile(values, 2.5),
+                "upper_95": np.percentile(values, 97.5),
+            }
+            assert optimized[model_id][metric_name] == pytest.approx(expected)
 
 
 def test_insufficient_formal_data_cannot_produce_admitted(tmp_path):

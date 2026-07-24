@@ -135,6 +135,9 @@ def test_runtime_is_scoped_and_snapshot_id_is_deterministic(tmp_path):
         "accepted_training_matches": 8,
         "excluded_team_type_matches": 0,
     }
+    from_matches = builder.build_from_matches(repository.list_matches(), cutoff)
+    assert from_matches.snapshot_id == first.snapshot_id
+    assert from_matches.data_fingerprint == first.data_fingerprint
 
 
 def test_runtime_excludes_matches_at_or_after_as_of(tmp_path):
@@ -231,6 +234,45 @@ def test_prediction_uses_evidence_gates_and_builtin_weights(tmp_path):
     assert result.predictions["xgboost"]["available"] is False
     assert result.predictions["monte_carlo"]["status"] == "derived"
     assert result.ensemble["effective_weights"].get("xgboost") is None
+
+
+def test_scientific_evaluation_skips_derived_models(tmp_path, monkeypatch):
+    repository = _repository_with_matches(tmp_path)
+    manager = RuntimeManager(
+        ModelRuntimeBuilder(repository, artifact_root=tmp_path / "models")
+    )
+    manager.initialize()
+    service = PredictionService(repository, manager)
+    request = service.request_from_payload({
+        "home_team": "拜仁", "away_team": "多特蒙德", "league": "德甲",
+    })
+    production = service.predict(request)
+
+    monkeypatch.setattr(
+        "prediction.service.MonteCarloModel.simulate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应模拟")),
+    )
+    poisson = manager.current().competition_models["bundesliga"].models["poisson"]
+    monkeypatch.setattr(
+        type(poisson), "predict_htft",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("不应计算半全场")),
+    )
+    monkeypatch.setattr(
+        type(poisson), "predict_handicap",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("不应计算让球")),
+    )
+
+    scientific = service.evaluate(request)
+
+    assert scientific.ensemble["home_win"] == pytest.approx(
+        production.ensemble["home_win"]
+    )
+    for model_id, value in production.predictions.items():
+        if model_id != "monte_carlo":
+            assert scientific.predictions[model_id] == value
+    assert scientific.simulation["status"] == "not_evaluated"
+    assert scientific.htft["reason"] == "scientific_scoring_mode"
+    assert scientific.handicap["role"] == "derived"
 
 
 def test_mixed_team_types_are_rejected(tmp_path):
