@@ -1,31 +1,37 @@
-import sys, os, json, math, time, threading, hmac
+import sys, os, json, math, time, threading, hmac, subprocess, re
+from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 import numpy as np
 
-from models.elo import EloRating
-from models.poisson import PoissonModel, build_strengths_from_results
-from models.dixon_coles import DixonColesModel
-from models.massey import MasseyRanking
-from models.form import FormModel
-from models.head_to_head import HeadToHeadModel
-from models.market_odds import MarketOddsModel
-from models.knn_similar import KNNSimilarModel
-from models.xgboost_model import XGBoostModel
-from models.neural_net import NeuralNetModel
-from models.monte_carlo import MonteCarloModel
-from models.bayesian_hierarchical import BayesianHierarchicalModel
-from features.player_impact import PlayerImpact
-from features.builder import FeatureBuilder
-from ensemble.bma import BayesianModelAveraging
-from ensemble.stacker import StackingEnsemble
-from ensemble.prediction_contract import NoAvailableModelsError, normalize_prediction
+from ensemble.prediction_contract import NoAvailableModelsError
 from config import *
 from data.history_db import load_history
+from data.match_repository import (
+    DEFAULT_DATABASE_PATH,
+    MatchRepository,
+    RepositoryNotInitializedError,
+)
+from backtest.storage import create_run_id
+from backtest.tasks import BacktestAlreadyRunningError, BacktestTaskStore
+from prediction import (
+    InvalidPredictionRequestError,
+    ModelExecutionError,
+    ModelRuntimeBuilder,
+    PredictionService,
+    RuntimeManager,
+    RuntimeNotReadyError,
+    RuntimeRefreshInProgressError,
+    SnapshotTimeMismatchError,
+)
 
 app = Flask(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKTEST_ROOT = (PROJECT_ROOT / "data/processed/backtests").resolve()
+_backtest_store = BacktestTaskStore(BACKTEST_ROOT)
 
 # ---- 竞彩投注引擎 ----
 from betting.jczq_engine import JczqEngine
@@ -45,28 +51,93 @@ def _convert_numpy(obj):
 
 _prediction_progress = {}
 
-elo_model = EloRating()
-poisson_model = PoissonModel()
-dixon_coles_model = DixonColesModel()
-massey_model = MasseyRanking()
-form_model = FormModel()
-h2h_model = HeadToHeadModel()
-market_model = MarketOddsModel()
-knn_model = KNNSimilarModel()
-xgb_model = XGBoostModel()
-nn_model = NeuralNetModel()
-mc_model = MonteCarloModel()
-bayes_model = BayesianHierarchicalModel()
-player_impact = PlayerImpact()
-bma = BayesianModelAveraging()
-stacker = StackingEnsemble()
-feature_builder = FeatureBuilder()
-
 _upcoming_matches_cache = []
 _fetch_errors = []
 _teams_cache = list(ALL_TEAMS)
 _initialized = False
 _model_init_lock = threading.RLock()
+_runtime_database_path = None
+_repository = None
+_runtime_manager = None
+_prediction_service = None
+
+
+def _configured_database_path():
+    return os.path.abspath(os.environ.get("FOOTBALL_DB_PATH", str(DEFAULT_DATABASE_PATH)))
+
+
+def _recover_backtest_tasks():
+    """Mark abandoned background runs without touching model state."""
+    return _backtest_store.recover()
+
+
+def _ensure_runtime_components():
+    global _runtime_database_path, _repository, _runtime_manager, _prediction_service
+    database_path = _configured_database_path()
+    if _repository is not None and _runtime_database_path == database_path:
+        return
+    _repository = MatchRepository(database_path)
+    _runtime_manager = RuntimeManager(ModelRuntimeBuilder(_repository))
+    _prediction_service = PredictionService(_repository, _runtime_manager)
+    _runtime_database_path = database_path
+    app.extensions["match_repository"] = _repository
+    app.extensions["runtime_manager"] = _runtime_manager
+    app.extensions["prediction_service"] = _prediction_service
+
+
+def _normalize_upcoming(matches):
+    _ensure_runtime_components()
+    normalized = []
+    for raw in matches:
+        match = dict(raw)
+        source = str(match.get("source") or "*")
+        league_raw = str(match.get("league") or "")
+        competition_value = match.get("competition_id") or league_raw
+        try:
+            home = _repository.resolve_team(
+                match.get("home_team", ""), source, "unknown"
+            ) or _repository.resolve_team_unique(match.get("home_team", ""))
+            away = _repository.resolve_team(
+                match.get("away_team", ""), source, "unknown"
+            ) or _repository.resolve_team_unique(match.get("away_team", ""))
+            competition = (
+                _repository.resolve_competition(str(competition_value))
+                if competition_value else None
+            )
+        except RepositoryNotInitializedError:
+            # Refresh remains usable before the local repository is initialized,
+            # but unresolved cache entries must stay explicitly unpredictable.
+            home = away = competition = None
+        predictable = bool(
+            home and away and competition
+            and home["team_id"] != away["team_id"]
+            and home["team_type"] == away["team_type"]
+        )
+        if not home or not away:
+            resolution_status = "unmatched"
+        elif home["team_id"] == away["team_id"]:
+            resolution_status = "same_team"
+        elif home["team_type"] != away["team_type"]:
+            resolution_status = "mixed_team_types"
+        elif not competition:
+            resolution_status = "unknown_competition"
+        else:
+            resolution_status = "resolved"
+        match.update({
+            "home_team_raw": match.get("home_team", ""),
+            "away_team_raw": match.get("away_team", ""),
+            "home_team_id": home["team_id"] if home else None,
+            "away_team_id": away["team_id"] if away else None,
+            "home_team": home["canonical_name"] if home else match.get("home_team", ""),
+            "away_team": away["canonical_name"] if away else match.get("away_team", ""),
+            "league_raw": league_raw,
+            "competition_id": competition["competition_id"] if competition else None,
+            "competition_name": competition["canonical_name"] if competition else league_raw,
+            "predictable": predictable,
+            "resolution_status": resolution_status,
+        })
+        normalized.append(match)
+    return normalized
 
 def _init_models():
     global _initialized
@@ -79,119 +150,19 @@ def _init_models():
 
 def _initialize_models_unlocked():
     global _upcoming_matches_cache, _fetch_errors, _teams_cache, _initialized
-
-    # 从持久化历史数据库加载真实比赛数据
-    try:
-        # using pre-imported _cal_load_history
-        from data.history_db import load_history as _lh
-        history = _lh()
-        print(f"[Init] history DB: {len(history)} matches")
-    except Exception as e:
-        print(f"[Init] history load failed: {e}")
-        history = []
-
-    # 线上抓取待开赛比赛
-    try:
-        from data.fetcher import load_or_fetch
-        data = load_or_fetch()
-        upcoming = data.get("upcoming", [])
-        _fetch_errors = data.get("errors", [])
-        _upcoming_matches_cache = upcoming
-        extra = set()
-        for m in upcoming:
-            for k in ["home_team", "away_team"]:
-                t = m.get(k, "")
-                if t: extra.add(t)
-        _teams_cache = sorted(set(_teams_cache) | extra)
-    except Exception as e:
-        print(f"[Init] fetch: {e}")
-        upcoming = []
-        _fetch_errors = [str(e)]
-        _upcoming_matches_cache = []
-
-    # 用历史数据初始化所有模型
-    if history:
-        history_fingerprint = elo_model.fingerprint_matches(history)
-        if not elo_model.load(history_fingerprint):
-            print("[Init] 重建 ELO（数据或参数已变化）...")
-            elo_model.rebuild(history)
-            elo_model.save()
-        strengths = build_strengths_from_results(history)
-        poisson_model.set_team_strengths(strengths)
-        dixon_coles_model.set_team_strengths(strengths)
-        massey_model.fit(history)
-        form_model.load_history(history)
-        h2h_model.load_history(history)
-        for m in history[:100]:
-            fv = knn_model.feature_vector(1.0,1.0,1.0,1.0,
-                form_model.get_form_score(m["home_team"])["form_score"],
-                form_model.get_form_score(m["away_team"])["form_score"],
-                elo_model.get_rating(m["home_team"]), elo_model.get_rating(m["away_team"]),
-                elo_model.get_rating(m["home_team"])-elo_model.get_rating(m["away_team"]))
-            knn_model.add_match(fv, m.get("home_goals",0), m.get("away_goals",0))
-        bayes_model.fit(history)
-    elif not elo_model.load():
-        print("[Init] 无历史数据和有效 ELO 产物，使用默认评分")
-
-    for team, players in SAMPLE_PLAYERS.items():
-        player_impact.set_squad(team, players)
-
-    bma.load()
-    xgb_model.load()
-    nn_model.load()
-    stacker.load()
-
-    # ===== 训练 XGBoost（如果未训练） =====
-    if history and len(history) >= 100:
-        if not xgb_model.is_trained:
-            try:
-                print("[Init] 训练 XGBoost (时间分割)...")
-                sorted_hist = sorted(history, key=lambda m: m.get("date", "2000-01-01"))
-                split_idx = int(len(sorted_hist) * 0.6)
-                base_hist = sorted_hist[:split_idx]
-                ml_hist = sorted_hist[split_idx:]
-
-                from models.elo import EloRating as _Elo
-                from models.form import FormModel as _Form
-                from models.head_to_head import HeadToHeadModel as _H2H
-                tmp_elo = _Elo(); tmp_elo.batch_update(base_hist)
-                tmp_form = _Form(); tmp_form.load_history(base_hist)
-                tmp_h2h = _H2H(); tmp_h2h.load_history(base_hist)
-
-                X_list, y_res, y_goals = [], [], []
-                for m in ml_hist:
-                    try:
-                        h2h = tmp_h2h.get_h2h(m["home_team"], m["away_team"])
-                        home_form = tmp_form.get_form_score(m["home_team"])
-                        away_form = tmp_form.get_form_score(m["away_team"])
-                        fb = feature_builder.build(
-                            elo_home=tmp_elo.get_rating(m["home_team"]),
-                            elo_away=tmp_elo.get_rating(m["away_team"]),
-                            atk_home=1.0, atk_away=1.0,
-                            def_home=1.0, def_away=1.0,
-                            form_home=home_form, form_away=away_form,
-                            h2h_stats=h2h, squad_home=1.0, squad_away=1.0,
-                            home_adv=HOME_ADVANTAGE.get(m.get("league","default"), 0.35),
-                            neutral=m.get("league") in ["世界杯","欧洲杯","美洲杯","欧国联"],
-                        )
-                        X_list.append(fb["vector"])
-                        hg, ag = m.get("home_goals",0), m.get("away_goals",0)
-                        y_res.append(0 if hg>ag else (1 if hg==ag else 2))
-                        y_goals.append(hg+ag)
-                    except (KeyError, TypeError, ValueError) as exc:
-                        print(f"[Init] 跳过无效训练样本: {exc}")
-                        continue
-
-                if len(X_list) >= 50:
-                    import numpy as np
-                    xgb_model.fit(np.array(X_list), np.array(y_res), np.array(y_goals))
-                    xgb_model.save()
-                    print(f"[Init] XGBoost OK ({len(X_list)} samples)")
-            except Exception as e:
-                print(f"[Init] XGBoost train failed: {e}")
-
+    _ensure_runtime_components()
+    snapshot = _runtime_manager.initialize()
+    from data.fetcher import load_cached
+    cached = load_cached()
+    _upcoming_matches_cache = _normalize_upcoming(cached.get("upcoming", []))
+    _fetch_errors = list(cached.get("errors", []))
+    _teams_cache = [team["canonical_name"] for team in _repository.list_teams()]
     _initialized = True
-    print(f"[Init] {len(history)} matches, {len(_teams_cache)} teams, {len(_upcoming_matches_cache)} upcoming")
+    print(
+        f"[Init] runtime {snapshot.snapshot_id[:20]}, "
+        f"{snapshot.training_sample_count} matches, {len(_teams_cache)} teams, "
+        f"{len(_upcoming_matches_cache)} upcoming"
+    )
 @app.route("/")
 def index():
     _init_models()
@@ -223,13 +194,25 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    """返回数据抓取状态"""
-    _init_models()
+    """返回数据和预测运行时状态。"""
+    try:
+        _init_models()
+        runtime = _runtime_manager.status()
+    except Exception as exc:
+        runtime = {
+            "ready": False,
+            "runtime_stale": True,
+            "last_refresh_error": {
+                "code": "RUNTIME_NOT_READY",
+                "message": str(exc),
+            },
+        }
     return jsonify({
         "upcoming_count": len(_upcoming_matches_cache),
         "teams_count": len(_teams_cache),
         "fetch_errors": _fetch_errors,
         "data_available": len(_upcoming_matches_cache) > 0,
+        "runtime": runtime,
     })
 
 @app.route("/api/progress/<task_id>")
@@ -278,7 +261,15 @@ def api_search_matches():
 
     # 2. 搜索历史交锋记录
     if not results:
-        h2h = h2h_model.get_h2h(team_a, team_b)
+        home = _repository.resolve_team_unique(team_a)
+        away = _repository.resolve_team_unique(team_b)
+        h2h = {"total_matches": 0}
+        if home and away and home["team_type"] == away["team_type"]:
+            group = _runtime_manager.current().team_type_models.get(home["team_type"])
+            if group:
+                h2h = group.models["head_to_head"].get_h2h(
+                    home["canonical_name"], away["canonical_name"]
+                )
         if h2h.get("total_matches", 0) > 0:
             results.append({
                 "home_team": team_a, "away_team": team_b,
@@ -363,9 +354,13 @@ def _parse_prediction_input(data, default_neutral=True):
 
     home_team = str(data.get("home_team") or "").strip()
     away_team = str(data.get("away_team") or "").strip()
-    if not home_team or not away_team:
+    home_team_id = str(data.get("home_team_id") or "").strip()
+    away_team_id = str(data.get("away_team_id") or "").strip()
+    if not (home_team or home_team_id) or not (away_team or away_team_id):
         raise PredictionInputError("请选择主队和客队", "MISSING_TEAMS")
-    if home_team == away_team:
+    if (home_team and home_team == away_team) or (
+        home_team_id and home_team_id == away_team_id
+    ):
         raise PredictionInputError("主客队不能相同", "SAME_TEAM")
 
     neutral = data.get("neutral", default_neutral)
@@ -394,6 +389,9 @@ def _parse_prediction_input(data, default_neutral=True):
     return {
         "home_team": home_team,
         "away_team": away_team,
+        "home_team_id": home_team_id,
+        "away_team_id": away_team_id,
+        "competition_id": str(data.get("competition_id") or ""),
         "league_cn": league_cn,
         "league": LEAGUES.get(league_cn, "world_cup"),
         "neutral": neutral,
@@ -403,174 +401,58 @@ def _parse_prediction_input(data, default_neutral=True):
         "draw_odds": odds[1],
         "away_odds": odds[2],
         "task_id": str(data.get("task_id") or "default"),
+        "predicted_at": data.get("predicted_at"),
+        "match_id": data.get("match_id"),
+        "odds_captured_at": data.get("odds_captured_at"),
     }
-
-
-def _safe_prediction(model_id, operation):
-    try:
-        raw_result = operation()
-    except Exception as exc:
-        print(f"[Predict] {model_id} failed: {exc}")
-        raw_result = {
-            "model": model_id,
-            "status": "error",
-            "warnings": ["prediction_failed"],
-        }
-    return normalize_prediction(model_id, raw_result)
-
-
-def _model_agreement(predictions):
-    valid = [prediction for prediction in predictions.values() if prediction.get("available")]
-    if len(valid) < 2:
-        return 0.0
-
-    deviations = []
-    for field in ("home_win", "draw", "away_win"):
-        values = [prediction[field] for prediction in valid]
-        average = sum(values) / len(values)
-        deviations.append(math.sqrt(sum((value - average) ** 2 for value in values) / len(values)))
-    return max(0.0, min(100.0, round(100 * (1.0 - sum(deviations) / 3 * 5), 1)))
 
 
 def _run_predictions(context, report_progress=None):
-    report_progress = report_progress or (lambda _done, _name: None)
-    home_team = context["home_team"]
-    away_team = context["away_team"]
-    neutral = context["neutral"]
-
-    request_player_impact = PlayerImpact()
-    for team, missing in (
-        (home_team, context["home_missing"]),
-        (away_team, context["away_missing"]),
-    ):
-        if team in SAMPLE_PLAYERS:
-            request_player_impact.set_squad(team, SAMPLE_PLAYERS[team])
-        request_player_impact.set_injuries(team, missing)
-    squad_info = request_player_impact.both_teams_impact(home_team, away_team)
-    home_adv = HOME_ADVANTAGE.get(
-        context["league_cn"], HOME_ADVANTAGE.get(context["league"], 0.35)
-    )
-
-    predictions = {}
-    steps = [
-        ("poisson", "泊松分布", lambda: poisson_model.predict(home_team, away_team, neutral)),
-        ("dixon_coles", "Dixon-Coles", lambda: dixon_coles_model.predict(home_team, away_team, neutral)),
-        ("elo", "ELO评级", lambda: elo_model.predict_match(home_team, away_team, neutral)),
-        ("massey", "Massey排名", lambda: massey_model.predict(home_team, away_team, neutral)),
-        ("form", "近期状态", lambda: form_model.predict(home_team, away_team, neutral)),
-        ("head_to_head", "交锋记录", lambda: h2h_model.predict(home_team, away_team, neutral)),
-    ]
-    for index, (model_id, display_name, operation) in enumerate(steps, start=1):
-        predictions[model_id] = _safe_prediction(model_id, operation)
-        report_progress(index, display_name)
-
-    def market_prediction():
-        if context["home_odds"] is not None:
-            return market_model.predict(
-                home_odds=context["home_odds"],
-                draw_odds=context["draw_odds"],
-                away_odds=context["away_odds"],
-            )
-        return market_model.predict()
-
-    predictions["market_odds"] = _safe_prediction("market_odds", market_prediction)
-    report_progress(7, "市场赔率")
-
-    knn_features = knn_model.feature_vector(
-        poisson_model.attack_strengths.get(home_team, 1.0),
-        poisson_model.defense_strengths.get(home_team, 1.0),
-        poisson_model.attack_strengths.get(away_team, 1.0),
-        poisson_model.defense_strengths.get(away_team, 1.0),
-        form_model.get_form_score(home_team)["form_score"],
-        form_model.get_form_score(away_team)["form_score"],
-        elo_model.get_rating(home_team), elo_model.get_rating(away_team),
-        elo_model.get_rating(home_team) - elo_model.get_rating(away_team),
-    )
-    predictions["knn_similar"] = _safe_prediction(
-        "knn_similar", lambda: knn_model.predict(knn_features)
-    )
-    report_progress(8, "KNN相似")
-
-    feature_data = feature_builder.build(
-        elo_home=elo_model.get_rating(home_team), elo_away=elo_model.get_rating(away_team),
-        atk_home=poisson_model.attack_strengths.get(home_team, 1.0),
-        atk_away=poisson_model.attack_strengths.get(away_team, 1.0),
-        def_home=poisson_model.defense_strengths.get(home_team, 1.0),
-        def_away=poisson_model.defense_strengths.get(away_team, 1.0),
-        form_home=form_model.get_form_score(home_team),
-        form_away=form_model.get_form_score(away_team),
-        h2h_stats=h2h_model.get_h2h(home_team, away_team),
-        squad_home=squad_info["home_completeness"],
-        squad_away=squad_info["away_completeness"],
-        home_adv=home_adv, neutral=neutral,
-    )
-    predictions["xgboost"] = _safe_prediction(
-        "xgboost", lambda: xgb_model.predict(feature_data["vector"])
-    )
-    report_progress(9, "XGBoost")
-    predictions["neural_net"] = _safe_prediction(
-        "neural_net", lambda: nn_model.predict(feature_data["vector"])
-    )
-    report_progress(10, "神经网络")
-
-    predictions["bayesian"] = _safe_prediction(
-        "bayesian", lambda: bayes_model.predict(home_team, away_team, neutral)
-    )
-    report_progress(11, "贝叶斯层次")
-
-    ensemble_result = bma.blend(predictions)
-    independent_predictions = dict(predictions)
-    simulation = mc_model.simulate([ensemble_result], [1.0])
-    simulation["role"] = "derived"
-    simulation["source"] = "ensemble"
-    predictions["monte_carlo"] = {
-        **simulation,
-        "model_id": "monte_carlo",
-        "available": False,
-        "status": "derived",
-        "warnings": ["derived_output"],
+    request_payload = {
+        "home_team": context.get("home_team"),
+        "away_team": context.get("away_team"),
+        "home_team_id": context.get("home_team_id"),
+        "away_team_id": context.get("away_team_id"),
+        "competition_id": context.get("competition_id"),
+        "league": context.get("league_cn"),
+        "neutral": context.get("neutral"),
+        "home_missing": context.get("home_missing", []),
+        "away_missing": context.get("away_missing", []),
+        "home_odds": context.get("home_odds"),
+        "draw_odds": context.get("draw_odds"),
+        "away_odds": context.get("away_odds"),
+        "predicted_at": context.get("predicted_at"),
+        "match_id": context.get("match_id"),
+        "odds_captured_at": context.get("odds_captured_at"),
     }
-    report_progress(12, "蒙特卡洛模拟")
-
-    model_agreement = _model_agreement(independent_predictions)
-    warnings = list(bma.load_warnings)
-    for prediction in independent_predictions.values():
-        warnings.extend(prediction.get("warnings", []))
-    warnings = list(dict.fromkeys(warnings))
-    if sum(1 for prediction in independent_predictions.values() if prediction.get("available")) < 2:
-        warnings.append("insufficient_models_for_agreement")
-
-    model_summary = {
-        "total_models": len(independent_predictions),
-        "available_models": sum(1 for prediction in independent_predictions.values() if prediction.get("available")),
-        "excluded_models": sum(1 for prediction in independent_predictions.values() if not prediction.get("available")),
-        "unknown_quality_models": sum(
-            1 for prediction in independent_predictions.values()
-            if prediction.get("available") and prediction.get("data_quality") is None
-        ),
-        "using_defaults_models": sum(
-            1 for prediction in independent_predictions.values() if prediction.get("using_defaults")
-        ),
-    }
-    return {
-        "predictions": predictions,
-        "ensemble": ensemble_result,
-        "simulation": simulation,
-        "model_agreement": model_agreement,
-        "model_summary": model_summary,
-        "warnings": warnings,
-        "squad_info": squad_info,
-        "htft": poisson_model.predict_htft(home_team, away_team, neutral),
-        "handicap": poisson_model.predict_handicap(home_team, away_team, neutral),
-    }
+    prediction_request = _prediction_service.request_from_payload(request_payload)
+    result = _prediction_service.predict(
+        prediction_request,
+        include_trace=bool(context.get("include_trace")),
+        progress=report_progress,
+    ).to_dict()
+    home = _repository.get_team(prediction_request.home_team_id)
+    away = _repository.get_team(prediction_request.away_team_id)
+    competition = _repository.get_competition(prediction_request.competition_id)
+    result.update({
+        "home_team": home["canonical_name"],
+        "away_team": away["canonical_name"],
+        "neutral": prediction_request.neutral,
+        "league": competition["canonical_name"],
+    })
+    return result
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
+        _init_models()
+    except Exception as exc:
+        print(f"[Runtime] initialization failed: {exc}")
+        return _api_error("预测运行时尚未就绪", "RUNTIME_NOT_READY", 503)
+    try:
         context = _parse_prediction_input(request.get_json(silent=True), default_neutral=True)
     except PredictionInputError as exc:
         return _api_error(str(exc), exc.code, 400)
-    _init_models()
 
     task_id = context["task_id"]
     _prediction_progress[task_id] = {"total": 12, "done": 0, "current": "准备中..."}
@@ -580,26 +462,20 @@ def predict():
             _prediction_progress[task_id]["current"]=name
     try:
         result = _run_predictions(context, report)
+    except InvalidPredictionRequestError as exc:
+        return _api_error(str(exc), exc.code, 400)
+    except SnapshotTimeMismatchError as exc:
+        return _api_error(str(exc), exc.code, 409)
     except NoAvailableModelsError as exc:
         return _api_error(str(exc), "NO_AVAILABLE_MODELS", 503)
+    except (RuntimeNotReadyError, ModelExecutionError) as exc:
+        return _api_error("预测服务暂时不可用", exc.code, 503 if isinstance(exc, RuntimeNotReadyError) else 500)
     except Exception as exc:
         print(f"[Predict] unexpected failure: {exc}")
         return _api_error("预测服务内部错误", "INTERNAL_ERROR", 500)
 
-    return jsonify(_convert_numpy({
-        "home_team": context["home_team"], "away_team": context["away_team"],
-        "neutral": context["neutral"], "league": context["league"],
-        "squad_info": result["squad_info"],
-        "predictions": result["predictions"],
-        "htft": result["htft"],
-        "ensemble": result["ensemble"],
-        "simulation": result.get("simulation"),
-        "handicap": result["handicap"],
-        "model_agreement": result["model_agreement"],
-        "confidence": result["model_agreement"],
-        "model_summary": result["model_summary"],
-        "warnings": result["warnings"],
-    }))
+    result.setdefault("confidence", result.get("model_agreement", 0.0))
+    return jsonify(_convert_numpy(result))
 
 @app.route("/api/upcoming")
 def api_upcoming():
@@ -612,7 +488,7 @@ def api_refresh_data():
     try:
         from data.fetcher import load_or_fetch
         d = load_or_fetch(force_refresh=True)
-        _upcoming_matches_cache = d.get("upcoming",[])
+        _upcoming_matches_cache = _normalize_upcoming(d.get("upcoming", []))
         _fetch_errors = d.get("errors", [])
         extra = set()
         for m in _upcoming_matches_cache:
@@ -629,183 +505,43 @@ def api_refresh_data():
 def api_debug_predict():
     """返回完整计算过程"""
     try:
-        context = _parse_prediction_input(request.get_json(silent=True), default_neutral=False)
+        _init_models()
+        context = _parse_prediction_input(
+            request.get_json(silent=True), default_neutral=False
+        )
+        context["include_trace"] = True
+        result = _run_predictions(context)
+        trace = result.pop("trace", {}) or {}
+        debug = dict(result)
+        debug["raw_data"] = trace.get("raw_data", {})
+        debug["calculation_steps"] = trace.get("calculation_steps", {})
+        debug["features"] = trace.get("features", {})
+        debug["model_outputs"] = {
+            key: {
+                "home_win": value.get("home_win"),
+                "draw": value.get("draw"),
+                "away_win": value.get("away_win"),
+                "expected_goals": value.get("expected_total_goals"),
+                "available": value.get("available"),
+                "status": value.get("status"),
+            }
+            for key, value in result.get("predictions", {}).items()
+        }
+        debug["weights"] = result.get("ensemble", {}).get("effective_weights", {})
+        return jsonify(_convert_numpy(debug))
     except PredictionInputError as exc:
         return _api_error(str(exc), exc.code, 400)
-    _init_models()
-    home_team = context["home_team"]
-    away_team = context["away_team"]
-    neutral = context["neutral"]
-    home_odds = context["home_odds"]
-    draw_odds = context["draw_odds"]
-    away_odds = context["away_odds"]
-
-    debug = {"home_team": home_team, "away_team": away_team, "neutral": neutral}
-
-    # ---- 原始数据 ----
-    elo_raw_home = elo_model.get_rating(home_team)
-    elo_raw_away = elo_model.get_rating(away_team)
-    home_bonus = 0 if neutral else 100
-    debug["raw_data"] = {
-        "elo_home": elo_raw_home,
-        "elo_away": elo_raw_away,
-        "elo_home_effective": elo_raw_home + home_bonus,  # 含主场加成
-        "elo_away_effective": elo_raw_away,
-        "home_bonus": home_bonus,
-        "attack_home": poisson_model.attack_strengths.get(home_team, 1.0),
-        "defense_home": poisson_model.defense_strengths.get(home_team, 1.0),
-        "attack_away": poisson_model.attack_strengths.get(away_team, 1.0),
-        "defense_away": poisson_model.defense_strengths.get(away_team, 1.0),
-        "form_home": form_model.get_form_score(home_team),
-        "form_away": form_model.get_form_score(away_team),
-        "h2h": h2h_model.get_h2h(home_team, away_team),
-        "massey_home": massey_model.ratings.get(home_team, 0),
-        "massey_away": massey_model.ratings.get(away_team, 0),
-    }
-
-    # ---- 每个模型的逐步计算 ----
-    steps = {}
-
-    # Poisson
-    la = debug["raw_data"]["attack_home"]
-    ld = debug["raw_data"]["defense_home"]
-    ra = debug["raw_data"]["attack_away"]
-    rd = debug["raw_data"]["defense_away"]
-    hf = 1.0 if neutral else 1.15
-    lam_h = 1.35 * la * rd * hf
-    lam_a = 1.35 * ra * ld * (1.0/hf)
-    steps["poisson"] = {
-        "formula": "lambda = league_avg/2 * attack * opp_defense * home_factor",
-        "league_avg_half": 1.35,
-        "home_attack_used": la, "away_defense_used": rd, "home_factor": hf,
-        "away_attack_used": ra, "home_defense_used": ld,
-        "lambda_home": round(lam_h, 3), "lambda_away": round(lam_a, 3),
-        "expected_total": round(lam_h + lam_a, 3),
-        "interpretation": f"主队预期进 {lam_h:.2f} 球, 客队预期进 {lam_a:.2f} 球",
-    }
-
-    # ELO
-    eh = debug["raw_data"]["elo_home"]
-    ea = debug["raw_data"]["elo_away"]
-    raw_diff = eh - ea  # 原始分差（不含主场加成）
-    elo_diff = raw_diff + home_bonus  # 有效分差（含主场加成）
-    exp_home = 1.0 / (1.0 + 10**(-elo_diff/400))
-    if home_bonus > 0 and raw_diff == 0:
-        interp = f"两队ELO相同({eh:.0f})，主场加成 +{home_bonus} 分 → 有效分差 {elo_diff:.0f}，主队预期胜率 {exp_home:.1%}"
-    elif home_bonus > 0:
-        interp = f"原始分差 {raw_diff:.0f} + 主场加成 +{home_bonus} → 有效分差 {elo_diff:.0f}，主队预期胜率 {exp_home:.1%}"
-    else:
-        interp = f"中立场地无主场加成，ELO 差 {elo_diff:.0f} 分，主队预期胜率 {exp_home:.1%}"
-    steps["elo"] = {
-        "formula": "P(home) = 1 / (1 + 10^(-diff/400))",
-        "elo_home": eh, "elo_away": ea,
-        "elo_home_effective": eh + home_bonus, "elo_away_effective": ea,
-        "home_bonus": home_bonus,
-        "raw_diff": raw_diff, "elo_diff": elo_diff,
-        "expected_win": round(exp_home, 3),
-        "interpretation": interp,
-    }
-
-    # Massey
-    mh = debug["raw_data"]["massey_home"]
-    ma = debug["raw_data"]["massey_away"]
-    diff_m = mh - ma + (0 if neutral else 0.35)
-    steps["massey"] = {
-        "formula": "P(home) = sigmoid(diff * 2.5)",
-        "massey_home": mh, "massey_away": ma, "diff": round(diff_m, 3),
-        "interpretation": f"Massey 分差 {diff_m:.2f}",
-    }
-
-    # Form
-    fh = debug["raw_data"]["form_home"]
-    fa = debug["raw_data"]["form_away"]
-    steps["form"] = {
-        "home_form": fh, "away_form": fa,
-        "form_diff": round(fh["form_score"] - fa["form_score"], 3),
-        "interpretation": f"主队状态分 {fh['form_score']:.2f} vs 客队 {fa['form_score']:.2f}",
-    }
-
-    # H2H
-    h2h = debug["raw_data"]["h2h"]
-    steps["head_to_head"] = {
-        "total_matches": h2h.get("total_matches", 0),
-        "record": f"{h2h.get('a_wins',0)}胜{h2h.get('draws',0)}平{h2h.get('b_wins',0)}负",
-    }
-
-    # Market odds
-    if home_odds and draw_odds and away_odds:
-        ho = home_odds; do = draw_odds; ao = away_odds
-        total = 1/ho + 1/do + 1/ao
-        steps["market_odds"] = {
-            "formula": "P = (1/odds) / (1/H + 1/D + 1/A), 即去水头归一化",
-            "odds_input": f"主{ho} / 平{do} / 客{ao}",
-            "raw_probs": f"主{1/ho:.4f} / 平{1/do:.4f} / 客{1/ao:.4f}",
-            "water_rate": f"{total:.4f}（水头 {(total-1)*100:.1f}%）",
-            "interpretation": f"赔率反推：市场认为主胜概率约 {1/ho/total*100:.1f}%",
-        }
-    else:
-        steps["market_odds"] = {"note": "未输入真实赔率，市场模型退出本次融合"}
-
-    # KNN
-    steps["knn_similar"] = {
-        "k": 20,
-        "note": "基于18维特征向量，找出历史上最相似的20场比赛，加权投票",
-    }
-
-    # XGBoost
-    steps["xgboost"] = {
-        "estimators": 200,
-        "note": "200棵梯度提升树，双头输出（胜平负+总进球），18维特征输入",
-    }
-
-    # Neural Net
-    steps["neural_net"] = {
-        "architecture": "18→32→16→3",
-        "note": "3层全连接网络，ReLU激活 + Softmax输出，SGD训练",
-    }
-
-    # Monte Carlo
-    steps["monte_carlo"] = {
-        "simulations": 10000,
-        "note": "对最终融合概率进行派生采样，不作为独立模型重复参与融合",
-    }
-
-    # Bayesian
-    bayes_data = debug["raw_data"]
-    steps["bayesian"] = {
-        "note": "基于后验分布的5000次采样, 每队lambda裁剪到 0.05~5.0",
-        "home_prior": f"N({bayes_model.prior_mean},{bayes_model.prior_std})",
-    }
-
-    debug["calculation_steps"] = steps
-
-    try:
-        prediction_result = _run_predictions(context)
+    except InvalidPredictionRequestError as exc:
+        return _api_error(str(exc), exc.code, 400)
+    except SnapshotTimeMismatchError as exc:
+        return _api_error(str(exc), exc.code, 409)
     except NoAvailableModelsError as exc:
         return _api_error(str(exc), "NO_AVAILABLE_MODELS", 503)
-    predictions = prediction_result["predictions"]
-
-    debug["model_outputs"] = {k: {
-        "home_win": round(v["home_win"], 4) if v.get("home_win") is not None else None,
-        "draw": round(v["draw"], 4) if v.get("draw") is not None else None,
-        "away_win": round(v["away_win"], 4) if v.get("away_win") is not None else None,
-        "expected_goals": v.get("expected_total_goals"),
-        "available": v.get("available"),
-        "status": v.get("status"),
-    } for k, v in predictions.items()}
-
-    debug["ensemble"] = prediction_result["ensemble"]
-    debug["simulation"] = prediction_result.get("simulation")
-    debug["weights"] = prediction_result["ensemble"]["effective_weights"]
-    debug["model_agreement"] = prediction_result["model_agreement"]
-    debug["model_summary"] = prediction_result["model_summary"]
-    debug["warnings"] = prediction_result["warnings"]
-
-    # HTFT
-    debug["htft"] = prediction_result["htft"]
-    debug["handicap"] = prediction_result["handicap"]
-
-    return jsonify(_convert_numpy(debug))
+    except (RuntimeNotReadyError, ModelExecutionError) as exc:
+        return _api_error("预测服务暂时不可用", exc.code, 503 if isinstance(exc, RuntimeNotReadyError) else 500)
+    except Exception as exc:
+        print(f"[Debug] unexpected failure: {exc}")
+        return _api_error("预测服务内部错误", "INTERNAL_ERROR", 500)
 
 @app.route("/api/history/matches")
 def api_history_matches():
@@ -834,11 +570,21 @@ def api_history_matches():
 @app.route("/api/history/h2h")
 def api_history_h2h():
     """两队交锋记录"""
-    # using pre-imported _cal_load_history
+    _init_models()
     team_a = request.args.get("a", "")
     team_b = request.args.get("b", "")
-    history = load_history()
-    h2h = [m for m in history if (m.get("home_team")==team_a and m.get("away_team")==team_b) or (m.get("home_team")==team_b and m.get("away_team")==team_a)]
+    home = _repository.resolve_team_unique(team_a)
+    away = _repository.resolve_team_unique(team_b)
+    snapshot = _runtime_manager.current()
+    h2h = []
+    if home and away and home["team_type"] == away["team_type"]:
+        group = snapshot.team_type_models.get(home["team_type"])
+        if group:
+            names = {home["canonical_name"], away["canonical_name"]}
+            h2h = [
+                dict(match) for match in group.matches
+                if {match.get("home_team"), match.get("away_team")} == names
+            ]
     h2h.sort(key=lambda m: m.get("date",""), reverse=True)
     return jsonify({"matches": h2h, "count": len(h2h)})
 
@@ -951,19 +697,7 @@ def api_betting_matches():
 
 @app.route("/api/calibration")
 def api_calibration():
-    import os
-    report_file = "data/processed/calibration_report.json"
-    weights_file = "ensemble/weights.json"
-    result = {}
-    if os.path.exists(report_file):
-        with open(report_file, "r", encoding="utf-8") as f:
-            result = json.load(f)
-    elif os.path.exists(weights_file):
-        with open(weights_file, "r", encoding="utf-8") as f:
-            result = json.load(f)
-    if not result:
-        return jsonify({"error": "please run calibrate.py"})
-    return jsonify(result)
+    return _backtest_report_response(completed_only=True)
 
 @app.route("/api/rankings")
 def api_rankings():
@@ -976,7 +710,12 @@ def api_rankings():
         national_set = set(meta.keys())
     from config import NATIONAL_TEAMS
     national_set.update(NATIONAL_TEAMS)
-    all_rankings = elo_model.get_league_rankings()
+    _init_models()
+    snapshot = _runtime_manager.current()
+    all_rankings = []
+    for group in snapshot.team_type_models.values():
+        all_rankings.extend(group.models["elo"].get_league_rankings())
+    all_rankings.sort(key=lambda item: item[1], reverse=True)
     national = []
     clubs = []
     for team, rating in all_rankings:
@@ -1020,116 +759,110 @@ def api_wc_matches():
     wc.sort(key=bj_key, reverse=True)
     return jsonify({"count": len(wc), "matches": wc})
 
+
+def _refresh_models_after_history_change():
+    """兼容入口：使用完整运行时原子刷新。"""
+    _init_models()
+    return _runtime_manager.refresh("history_change")
+
 @app.route("/api/sync_fifa", methods=["POST"])
 @_admin_required
 def api_sync_fifa():
     """同步FIFA世界杯比赛数据"""
-    global elo_model, poisson_model
-    from data.history_db import load_history, add_match
-    from models.elo import EloRating
-    from models.poisson import build_strengths_from_results
-    import requests as req, unicodedata
-    from datetime import datetime, timedelta, timezone
+    from data.fifa_sync import fetch_recent_fifa_source_records
+    from data.match_repository import RepositoryNotInitializedError
 
     try:
-        H = {"User-Agent": "Mozilla/5.0"}
-        EN_CN = {
-            "Argentina":"阿根廷","Brazil":"巴西","Germany":"德国","France":"法国","Spain":"西班牙",
-            "England":"英格兰","Italy":"意大利","Netherlands":"荷兰","Portugal":"葡萄牙","Belgium":"比利时",
-            "Croatia":"克罗地亚","Uruguay":"乌拉圭","Colombia":"哥伦比亚","Mexico":"墨西哥",
-            "Japan":"日本","Korea Republic":"韩国","Iran":"伊朗","IR Iran":"伊朗",
-            "Saudi Arabia":"沙特阿拉伯","Australia":"澳大利亚","Senegal":"塞内加尔",
-            "Morocco":"摩洛哥","Tunisia":"突尼斯","Ghana":"加纳","Cameroon":"喀麦隆",
-            "Nigeria":"尼日利亚","Egypt":"埃及","Algeria":"阿尔及利亚",
-            "Costa Rica":"哥斯达黎加","USA":"美国","Canada":"加拿大","Panama":"巴拿马",
-            "Ecuador":"厄瓜多尔","Peru":"秘鲁","Chile":"智利","Paraguay":"巴拉圭",
-            "Switzerland":"瑞士","Austria":"奥地利","Serbia":"塞尔维亚","Denmark":"丹麦",
-            "Sweden":"瑞典","Norway":"挪威","Poland":"波兰","Czechia":"捷克",
-            "Ukraine":"乌克兰","Turkey":"土耳其","Greece":"希腊","Scotland":"苏格兰",
-            "Wales":"威尔士","Hungary":"匈牙利","Slovakia":"斯洛伐克","Romania":"罗马尼亚",
-            "Finland":"芬兰","Iceland":"冰岛","Slovenia":"斯洛文尼亚",
-            "Bosnia and Herzegovina":"波黑","Georgia":"格鲁吉亚","Israel":"以色列",
-            "Venezuela":"委内瑞拉","Haiti":"海地","South Africa":"南非",
-            "Qatar":"卡塔尔","Iraq":"伊拉克","United Arab Emirates":"阿联酋",
-            "New Zealand":"新西兰","Burkina Faso":"布基纳法索","Mali":"马里",
-            "Cote d'Ivoire":"科特迪瓦","Côte d'Ivoire":"科特迪瓦",
-            "Türkiye":"土耳其","Curaçao":"库拉索","Curacao":"库拉索",
-            "Cabo Verde":"佛得角","Congo DR":"刚果民主共和国","Jordan":"约旦",
-        }
-        def tr(n):
-            if not n: return "?"
-            if n in EN_CN: return EN_CN[n]
-            n_norm = unicodedata.normalize('NFKD', n).encode('ascii','ignore').decode()
-            for e, c in EN_CN.items():
-                e_norm = unicodedata.normalize('NFKD', e).encode('ascii','ignore').decode()
-                if e_norm.lower() == n_norm.lower(): return c
-                if e_norm.lower() in n_norm.lower() or n_norm.lower() in e_norm.lower(): return c
-            return n
+        _ensure_runtime_components()
+        _repository.get_data_quality_report()
+        fetched = fetch_recent_fifa_source_records(days=14)
 
-        history = load_history()
-        db_keys = set((m.get("home_team",""), m.get("away_team",""), m.get("date","")) for m in history)
-        added = 0
-        fetched = 0
-        
-        today = datetime.now(timezone.utc)
-        # Query in 3-day chunks to avoid API pagination limits
-        for days_back in range(14, -1, -3):
-            sd = (today - timedelta(days=min(days_back+2, 14))).strftime("%Y-%m-%dT00:00:00Z")
-            ed = (today - timedelta(days=max(days_back-1, 0))).strftime("%Y-%m-%dT23:59:59Z")
-            try:
-                r = req.get("https://api.fifa.com/api/v3/calendar/matches",
-                    params={"language":"en","count":200,"from":sd,"to":ed}, headers=H, timeout=15)
-                results = r.json().get("Results",[])
-                for m in results:
-                    comp = (m.get("CompetitionName",[{}]) or [{}])[0].get("Description","")
-                    if "World Cup" not in comp or "Women" in comp: continue
-                    fetched += 1
-                    
-                    home = m.get("Home",{})
-                    away = m.get("Away",{})
-                    hn = tr((home.get("TeamName",[{}]) or [{}])[0].get("Description") or home.get("ShortClubName") or "")
-                    an = tr((away.get("TeamName",[{}]) or [{}])[0].get("Description") or away.get("ShortClubName") or "")
-                    hs = m.get("HomeTeamScore")
-                    aws = m.get("AwayTeamScore")
-                    if hs is None or aws is None: continue
-                    if hn == "?" or an == "?" or hn == an: continue
-                    
-                    key = (hn, an, (m.get("Date") or "")[:10])
-                    if key not in db_keys:
-                        match = {"home_team":hn,"away_team":an,"home_goals":int(hs),"away_goals":int(aws),"league":"世界杯","date":key[2]}
-                        add_match(match)
-                        db_keys.add(key)
-                        added += 1
-            except Exception as exc:
-                print(f"[FIFA] 同步区间 {sd} - {ed} 失败: {exc}")
+        def import_records():
+            sync_run_id = _repository.create_sync_run("fifa_recent", {"days": 14})
+            counts = _repository.import_source_records(
+                fetched["records"], sync_run_id, sync_type="fifa_recent"
+            )
+            return {"sync_run_id": sync_run_id, **counts}
 
-        if added > 0:
-            h2 = load_history()
-            refreshed_elo = EloRating()
-            refreshed_elo.rebuild(h2)
-            refreshed_elo.save()
-            strengths = build_strengths_from_results(h2)
-            refreshed_poisson = PoissonModel()
-            refreshed_poisson.set_team_strengths(strengths)
-            with _model_init_lock:
-                elo_model = refreshed_elo
-                poisson_model = refreshed_poisson
+        imported, refresh = _runtime_manager.run_update(import_records, "fifa_recent")
+        if imported is None:
+            return _api_error("FIFA 数据同步失败", "FIFA_SYNC_FAILED", 500)
 
-        return jsonify({"status":"ok","fetched":fetched,"added":added,"total_history":len(load_history())})
+        return jsonify({
+            "status": (
+                "partial" if fetched["errors"] or refresh.status != "ok" else "ok"
+            ),
+            **imported,
+            "fetched": fetched["fetched"],
+            "errors": fetched["errors"],
+            "total_history": len(_repository.list_matches({"status": "finished"})),
+            "runtime_refresh": refresh.to_dict(),
+        })
+    except RuntimeRefreshInProgressError as exc:
+        return _api_error(str(exc), exc.code, 409)
+    except RepositoryNotInitializedError:
+        return _api_error(
+            "比赛数据库尚未初始化，请先执行历史数据迁移",
+            "MATCH_REPOSITORY_NOT_INITIALIZED",
+            503,
+        )
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        print(f"[FIFA] 同步失败: {e}")
+        return _api_error("FIFA 数据同步失败", "FIFA_SYNC_FAILED", 500)
 
-# Pre-import calibrate to avoid thread issues
-try:
-    from calibrate import backtest as _cal_backtest, calibrate_weights as _cal_weights
-    # using pre-imported _cal_load_history as _cal_load_history
-    CAL_AVAILABLE = True
-except Exception as e:
-    print(f"[Calibrate] Import warning: {e}")
-    CAL_AVAILABLE = False
+# ========== Walk-forward 回测与模型准入 ==========
+_BACKTEST_RUN_ID = re.compile(r"bt-[A-Za-z0-9._-]+$")
 
-# ========== 校准系统 Web 界面 ==========
-_calibration_state = {"running": False, "progress": 0, "message": "", "report": None, "weights": None, "total": 0}
+
+def _requested_backtest_run_id(completed_only=False):
+    run_id = str(request.args.get("run_id") or "").strip()
+    if run_id and not _BACKTEST_RUN_ID.fullmatch(run_id):
+        return None, _api_error("run_id 格式无效", "INVALID_BACKTEST_RUN_ID", 400)
+    if not run_id:
+        run_id = _backtest_store.latest_run_id(completed_only=completed_only)
+    if not run_id:
+        return None, _api_error("尚无回测运行", "BACKTEST_RUN_NOT_FOUND", 404)
+    return run_id, None
+
+
+def _public_backtest_status(status):
+    return {
+        key: status.get(key)
+        for key in (
+            "run_id", "state", "outcome", "queued_at", "started_at",
+            "heartbeat_at", "finished_at", "exit_code", "progress", "error",
+        )
+    }
+
+
+def _backtest_report_response(completed_only=False):
+    run_id, error = _requested_backtest_run_id(completed_only=completed_only)
+    if error:
+        return error
+    status = _backtest_store.read_status(run_id)
+    if not status:
+        return _api_error("回测运行不存在", "BACKTEST_RUN_NOT_FOUND", 404)
+    if status.get("state") != "completed":
+        return _api_error(
+            "回测报告尚未完成", "BACKTEST_REPORT_NOT_READY", 409,
+            {"run_id": run_id, "state": status.get("state")},
+        )
+    run_dir = _backtest_store.run_dir(run_id)
+    try:
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+        admission = json.loads((run_dir / "admission.json").read_text(encoding="utf-8"))
+        report_markdown = (run_dir / "report.md").read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        return _api_error("回测报告文件损坏", "BACKTEST_REPORT_INVALID", 500)
+    return jsonify({
+        "status": "ok",
+        "run": _public_backtest_status(status),
+        "manifest": manifest,
+        "metrics": metrics,
+        "admission": admission,
+        "report_markdown": report_markdown,
+    })
 
 @app.route("/rankings")
 def rankings_page():
@@ -1143,25 +876,53 @@ def calibrate_page():
 @app.route("/api/calibrate/run", methods=["POST"])
 @_admin_required
 def api_calibrate_run():
-    """启动校准（后台运行 calibrate.py）"""
-    import json, os, subprocess, sys
-    
-    # Check if already running via status file
-    status_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_status.json")
-    if os.path.exists(status_file):
-        with open(status_file, "r", encoding="utf-8") as f:
-            s = json.load(f)
-        if not s.get("done", True):
-            return jsonify({"error": "校准已在运行中", "progress": s.get("progress",0), "message": s.get("message","")}), 409
-    
-    # Start calibrate.py in background
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "calibrate.py")
+    _recover_backtest_tasks()
+    run_id = create_run_id()
     try:
-        subprocess.Popen([sys.executable, script], cwd=os.path.dirname(script),
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-        return jsonify({"status": "started", "message": "calibrate.py 已在后台启动，约需 1-3 分钟"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        _backtest_store.reserve(run_id)
+    except BacktestAlreadyRunningError as exc:
+        return _api_error(
+            "已有回测任务正在运行", "BACKTEST_ALREADY_RUNNING", 409,
+            {"run_id": exc.run_id},
+        )
+    run_dir = _backtest_store.run_dir(run_id)
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "calibrate_cli.py"),
+        "backtest",
+        "--database", _configured_database_path(),
+        "--as-of", datetime.now(timezone.utc).isoformat(),
+        "--run-id", run_id,
+        "--output-root", str(_backtest_store.root),
+    ]
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with (run_dir / "stdout.log").open("a", encoding="utf-8") as stdout_handle, (
+            run_dir / "stderr.log"
+        ).open("a", encoding="utf-8") as stderr_handle:
+            popen_options = {
+                "cwd": PROJECT_ROOT,
+                "stdout": stdout_handle,
+                "stderr": stderr_handle,
+                "shell": False,
+                "env": {**os.environ, "PYTHONUNBUFFERED": "1"},
+            }
+            if os.name == "nt":
+                popen_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                popen_options["start_new_session"] = True
+            process = subprocess.Popen(command, **popen_options)
+        status = _backtest_store.read_status(run_id) or {}
+        if status.get("state") in {"queued", "running"}:
+            _backtest_store.claim(run_id, process.pid)
+    except Exception:
+        _backtest_store.fail(run_id, "BACKTEST_START_FAILED", "后台回测启动失败")
+        _backtest_store.release(run_id)
+        return _api_error("后台回测启动失败", "BACKTEST_START_FAILED", 500)
+    return jsonify({
+        "status": "started", "run_id": run_id,
+        "message": "Walk-forward 回测已启动",
+    }), 202
 def _lottery_prediction(lottery_key, force_refresh=False):
     from lottery_fetcher import fetch_lottery
     from lottery_predictor import full_analysis
@@ -1202,32 +963,17 @@ def api_lottery_predict_refresh(lottery_key):
     )
 @app.route("/api/calibrate/status")
 def api_calibrate_status():
-    """查询校准状态（读取 calibrate.py 写入的状态文件）"""
-    import json, os
-    status_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_status.json")
-    if os.path.exists(status_file):
-        with open(status_file, "r", encoding="utf-8") as f:
-            s = json.load(f)
-        # If done, also load the report
-        if s.get("done"):
-            report_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "processed", "calibration_report.json")
-            if os.path.exists(report_file):
-                with open(report_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                s["report"] = data.get("report", {})
-                s["weights"] = data.get("weights", {})
-                s["total"] = data.get("total_matches", 0)
-        return jsonify(s)
-    return jsonify({"progress": 0, "message": "尚未运行校准", "done": True})
+    run_id, error = _requested_backtest_run_id()
+    if error:
+        return error
+    status = _backtest_store.read_status(run_id)
+    if not status:
+        return _api_error("回测运行不存在", "BACKTEST_RUN_NOT_FOUND", 404)
+    return jsonify({"status": "ok", "run": _public_backtest_status(status)})
 
 @app.route("/api/calibrate/report")
 def api_calibrate_report():
-    import json, os
-    report_file = "data/processed/calibration_report.json"
-    if os.path.exists(report_file):
-        with open(report_file, "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
-    return jsonify({"error":"暂无校准报告"}), 404
+    return _backtest_report_response()
 
 # ========== 彩票开奖查询 ==========
 from lottery_fetcher import fetch_all as _fetch_all_lottery

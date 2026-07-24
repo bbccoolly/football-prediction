@@ -1,166 +1,94 @@
-# main.py - CLI 主入口
+"""足球预测系统命令行入口。"""
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from data.match_repository import get_default_repository
+from prediction import ModelRuntimeBuilder, PredictionService, RuntimeManager
 
-from models.elo import EloRating
-from models.poisson import PoissonModel, build_strengths_from_results
-from models.dixon_coles import DixonColesModel
-from models.massey import MasseyRanking
-from models.form import FormModel
-from models.head_to_head import HeadToHeadModel
-from models.market_odds import MarketOddsModel
-from models.knn_similar import KNNSimilarModel
-from models.xgboost_model import XGBoostModel
-from models.neural_net import NeuralNetModel
-from models.monte_carlo import MonteCarloModel
-from models.bayesian_hierarchical import BayesianHierarchicalModel
-from features.player_impact import PlayerImpact
-from features.builder import FeatureBuilder
-from ensemble.bma import BayesianModelAveraging
-from ensemble.stacker import StackingEnsemble
-from ensemble.prediction_contract import normalize_prediction
-from config import HOME_ADVANTAGE
+
+MODEL_NAMES = {
+    "poisson": "Poisson", "dixon_coles": "Dixon-Coles", "elo": "ELO",
+    "massey": "Massey", "form": "近期状态", "head_to_head": "历史交锋",
+    "market_odds": "市场赔率", "knn_similar": "KNN",
+    "xgboost": "XGBoost", "neural_net": "神经网络",
+    "monte_carlo": "Monte Carlo", "bayesian": "Bayesian",
+}
 
 
 def print_banner():
     print()
     print("=" * 60)
-    print("  Soccer Prediction System v2.0")
-    print("  11 Models | Bayesian Ensemble | Derived Simulation")
+    print("  足球预测系统 v2.1")
+    print("  共享预测服务 | 分域模型 | 原子快照")
     print("=" * 60)
     print()
 
 
-def print_prediction(predictions, ensemble, model_agreement):
-    ens = ensemble
+def print_prediction(result):
+    ensemble = result["ensemble"]
     print()
-    print("-" * 50)
-    print(f"  Ensemble  (model agreement: {model_agreement:.0f}%)")
-    print("-" * 50)
-    print(f"  Home: {ens['home_win']*100:5.1f}%  |  Draw: {ens['draw']*100:5.1f}%  |  Away: {ens['away_win']*100:5.1f}%")
-    print(f"  Expected goals: {ens['expected_total_goals']:.1f}")
-    print()
-    print("  Top scores:")
-    for score, prob in ens.get("top_scores", [])[:5]:
-        bar = "#" * int(prob * 200)
-        print(f"    {score}  {prob*100:5.1f}%  {bar}")
-    print()
-    print("-" * 50)
-    print(f"  {'Model':<16} {'Home':>8} {'Draw':>8} {'Away':>8} {'Goals':>6} {'Weight':>8}")
-    print("  " + "-" * 56)
-    model_names = {
-        "poisson":"Poisson","dixon_coles":"Dixon-Coles","elo":"ELO",
-        "massey":"Massey","form":"Form","head_to_head":"H2H",
-        "market_odds":"Market","knn_similar":"KNN",
-        "xgboost":"XGBoost","neural_net":"NN",
-        "monte_carlo":"MonteCarlo","bayesian":"Bayesian",
-    }
-    weights = ens.get("weights", {})
-    for key, pred in predictions.items():
-        w = weights.get(key, 0)
-        if not pred.get("available", True):
-            print(f"  {model_names.get(key, key):<16} {'unavailable':>39} {w*100:7.1f}%")
+    print("-" * 60)
+    print(
+        f"  融合结果：主胜 {ensemble['home_win'] * 100:5.1f}% | "
+        f"平局 {ensemble['draw'] * 100:5.1f}% | "
+        f"客胜 {ensemble['away_win'] * 100:5.1f}%"
+    )
+    print(f"  预期总进球：{ensemble['expected_total_goals']:.2f}")
+    print(f"  模型一致度：{result['model_agreement']:.1f}%")
+    print("-" * 60)
+    for model_id, prediction in result["predictions"].items():
+        name = MODEL_NAMES.get(model_id, model_id)
+        if not prediction.get("available"):
+            print(f"  {name:<16} 不可用 ({prediction.get('status', 'unknown')})")
             continue
-        goals = pred.get("expected_total_goals", 0)
-        print(f"  {model_names.get(key, key):<16} {pred['home_win']*100:7.1f}% {pred['draw']*100:7.1f}% {pred['away_win']*100:7.1f}% {goals:5.1f} {w*100:7.1f}%")
-    print()
+        weight = ensemble.get("effective_weights", {}).get(model_id, 0.0)
+        print(
+            f"  {name:<16} {prediction['home_win'] * 100:5.1f}% / "
+            f"{prediction['draw'] * 100:5.1f}% / "
+            f"{prediction['away_win'] * 100:5.1f}%  权重 {weight * 100:5.1f}%"
+        )
+    print(f"  快照：{result['runtime_snapshot_id']}")
+
+
+def create_service():
+    repository = get_default_repository()
+    manager = RuntimeManager(ModelRuntimeBuilder(repository))
+    manager.initialize()
+    return PredictionService(repository, manager)
 
 
 def run_interactive():
     print_banner()
-    print("[Init] Loading models...")
-    import random
-    rng = random.Random(42)
-    sample_teams = ["Argentina","France","Brazil","England","Portugal","Spain","Germany","Italy","Netherlands","Croatia"]
-    sample_matches = []
-    for _ in range(100):
-        h = rng.choice(sample_teams); a = rng.choice(sample_teams)
-        if h == a: continue
-        sample_matches.append({"home_team":h,"away_team":a,"home_goals":rng.choices([0,1,2,3,4],weights=[8,20,25,15,7])[0],"away_goals":rng.choices([0,1,2,3,4],weights=[10,22,23,12,5])[0]})
-
-    elo = EloRating(); elo.rebuild(sample_matches)
-    strengths = build_strengths_from_results(sample_matches)
-    poisson = PoissonModel(); poisson.set_team_strengths(strengths)
-    dc = DixonColesModel(); dc.set_team_strengths(strengths)
-    massey = MasseyRanking(); massey.fit(sample_matches)
-    form = FormModel(); form.load_history(sample_matches)
-    h2h = HeadToHeadModel(); h2h.load_history(sample_matches)
-    market = MarketOddsModel()
-    knn = KNNSimilarModel()
-    for m in sample_matches:
-        fv = knn.feature_vector(1.0,1.0,1.0,1.0, 0.5,0.5, elo.get_rating(m["home_team"]),elo.get_rating(m["away_team"]), elo.get_rating(m["home_team"])-elo.get_rating(m["away_team"]))
-        knn.add_match(fv, m["home_goals"], m["away_goals"])
-    xgb = XGBoostModel(); nn = NeuralNetModel()
-    mc = MonteCarloModel()
-    bayes = BayesianHierarchicalModel(); bayes.fit(sample_matches)
-    bma = BayesianModelAveraging(); bma.load()
-
-    print("[Init] Done!")
-    print()
-
+    print("[初始化] 正在构建预测运行时...")
+    service = create_service()
+    print("[初始化] 完成")
     while True:
-        print("-" * 50)
-        home = input("  Home team (q quit): ").strip()
-        if home.lower() == 'q': break
-        away = input("  Away team: ").strip()
-        if not home or not away: continue
-        if home == away: print("  Cannot be same"); continue
-        neutral = input("  Neutral? (y/n): ").strip().lower() == 'y'
-
-        print(f"  {home} vs {away}")
-        predictions = {}
-        predictions["poisson"] = normalize_prediction("poisson", poisson.predict(home, away, neutral))
-        predictions["dixon_coles"] = normalize_prediction("dixon_coles", dc.predict(home, away, neutral))
-        predictions["elo"] = normalize_prediction("elo", elo.predict_match(home, away, neutral))
-        predictions["massey"] = normalize_prediction("massey", massey.predict(home, away, neutral))
-        predictions["form"] = normalize_prediction("form", form.predict(home, away, neutral))
-        predictions["head_to_head"] = normalize_prediction("head_to_head", h2h.predict(home, away, neutral))
-        predictions["market_odds"] = normalize_prediction("market_odds", market.predict())
-        fq = knn.feature_vector(
-            poisson.attack_strengths.get(home,1.0),poisson.defense_strengths.get(home,1.0),
-            poisson.attack_strengths.get(away,1.0),poisson.defense_strengths.get(away,1.0),
-            form.get_form_score(home)["form_score"],form.get_form_score(away)["form_score"],
-            elo.get_rating(home),elo.get_rating(away),elo.get_rating(home)-elo.get_rating(away))
-        predictions["knn_similar"] = normalize_prediction("knn_similar", knn.predict(fq))
-        predictions["xgboost"] = normalize_prediction("xgboost", xgb.predict(fq))
-        predictions["neural_net"] = normalize_prediction("neural_net", nn.predict(fq))
-        available = {
-            key: value for key, value in predictions.items()
-            if value.get("available") and bma.get_weights().get(key, 0) > 0
-        }
-        predictions["monte_carlo"] = normalize_prediction(
-            "monte_carlo",
-            mc.simulate(
-                list(available.values()),
-                [bma.get_weights()[key] for key in available],
-            ) if available else {"status": "unavailable"},
-        )
-        predictions["bayesian"] = normalize_prediction("bayesian", bayes.predict(home, away, neutral))
-        blend = bma.blend(predictions)
-
-        valid = [prediction for prediction in predictions.values() if prediction.get("available")]
-        home_p = [p["home_win"] for p in valid]
-        draw_p = [p["draw"] for p in valid]
-        away_p = [p["away_win"] for p in valid]
-        import math
-        std = lambda vs: math.sqrt(sum((x-sum(vs)/len(vs))**2 for x in vs)/len(vs))
-        agreement = max(0,min(100,100*(1.0-(std(home_p)+std(draw_p)+std(away_p))/3*5))) if len(valid) >= 2 else 0
-        print_prediction(predictions, blend, agreement)
+        print()
+        home = input("主队（输入 q 退出）：").strip()
+        if home.lower() == "q":
+            break
+        away = input("客队：").strip()
+        league = input("赛事（默认世界杯）：").strip() or "世界杯"
+        neutral = input("是否中立场（y/N）：").strip().lower() == "y"
+        try:
+            request = service.request_from_payload({
+                "home_team": home,
+                "away_team": away,
+                "league": league,
+                "neutral": neutral,
+            })
+            print_prediction(service.predict(request).to_dict())
+        except Exception as exc:
+            print(f"预测失败：{exc}")
 
 
 def run_web():
     from web.app import app, _init_models
+
     _init_models()
-    print("\n" + "=" * 60)
-    print("  Soccer Prediction System v2.0")
-    print("  Open: http://127.0.0.1:5000")
-    print("=" * 60)
+    print("访问 http://127.0.0.1:5000")
     app.run(debug=False, host="127.0.0.1", port=5000)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "web":
-        run_web()
-    else:
-        run_interactive()
+    import sys
+
+    run_web() if len(sys.argv) > 1 and sys.argv[1] == "web" else run_interactive()

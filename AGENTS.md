@@ -28,6 +28,8 @@
 - 启动交互式命令行：`python main.py`。
 - 执行自动化测试：`pytest -q`。测试默认禁止网络访问。
 - 执行编译检查：`python -m compileall -q .`。
+- 历史迁移 dry-run：`python scripts/migrate_history.py --source data/processed/match_history.json`。
+- 只有明确需要写入标准库时才增加 `--apply`；可用 `FOOTBALL_DB_PATH` 覆盖数据库路径。
 - 只有在允许联网和写入生成数据时，才运行校准：`python calibrate.py`。
 
 ## 项目结构
@@ -36,7 +38,7 @@
 - `models/`：各类预测模型。
 - `features/`：特征构建和球员影响逻辑。
 - `ensemble/`：BMA 和 Stacking 集成实现。
-- `data/`：外部数据采集和本地历史数据。
+- `data/`：外部数据适配、SQLite 标准比赛仓库、球队别名和本地历史数据。
 - `betting/`：独立的竞彩足球分析与方案规划流程。
 - `config.py`：联赛、球队、模型参数和路径配置。
 

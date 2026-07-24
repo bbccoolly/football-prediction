@@ -1,0 +1,31 @@
+{
+  "matches": [
+    {
+      "match_id": "legacy-1",
+      "home_team": "FC Bayern München",
+      "away_team": "Borussia Dortmund",
+      "home_goals": 2,
+      "away_goals": 1,
+      "league": "德甲",
+      "date": "2025-01-10"
+    },
+    {
+      "match_id": "legacy-2",
+      "home_team": "法国",
+      "away_team": "西班牙",
+      "home_goals": 1,
+      "away_goals": 1,
+      "league": "世界杯",
+      "date_time": "2025-02-01T18:00:00Z",
+      "neutral": true
+    },
+    {
+      "home_team": "未收录主队",
+      "away_team": "未收录客队",
+      "home_goals": 0,
+      "away_goals": 0,
+      "league": "测试联赛",
+      "date": "2025-03-01"
+    }
+  ]
+}

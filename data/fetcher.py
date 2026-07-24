@@ -63,6 +63,7 @@ def fetch_500():
                 try:
                     matches.append({
                         "home_team": home, "away_team": away,
+                        "source": "500.com",
                         "venue": get_venue(home) or get_venue(away) or "", "league": league,
                         "home_odds": float(odds[0]),
                         "draw_odds": float(odds[1]),
@@ -102,6 +103,7 @@ def fetch_sporttery():
                 had = oh.get("hadList",[{}])[-1] if oh.get("hadList") else {}
                 matches.append({
                     "home_team": m.get("homeTeam",""), "away_team": m.get("awayTeam",""),
+                    "source": "sporttery",
                     "league": m.get("leagueName",""),
                     "match_time": m.get("matchTime","") or m.get("matchDate",""),
                     "home_odds": float(had["h"]) if had.get("h") else None,
@@ -140,6 +142,22 @@ def load_or_fetch(force_refresh=False):
         json.dump(data,f,ensure_ascii=False,indent=2)
     if not upcoming: print(f"[抓取] 失败: {errors}")
     return data
+
+def load_cached():
+    """只读加载待开赛缓存；启动期间不得触发网络或写文件。"""
+    if not os.path.exists(CACHE_FILE):
+        return {"upcoming": [], "history": [], "errors": ["cache_missing"]}
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("cache root must be an object")
+        data.setdefault("upcoming", [])
+        data.setdefault("history", [])
+        data.setdefault("errors", [])
+        return data
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return {"upcoming": [], "history": [], "errors": ["cache_invalid"]}
 
 def get_upcoming_matches(): return load_or_fetch().get("upcoming",[])
 def get_historical_matches(): return load_or_fetch().get("history",[])

@@ -6,7 +6,8 @@ import numpy as np
 class FeatureBuilder:
     """汇总所有模型、人员、场地信息，构造标准化特征向量"""
 
-    FEATURE_NAMES = [
+    FEATURE_VERSION = "2"
+    FEATURE_NAMES = (
         "elo_diff",           # ELO 分差
         "massey_diff",        # Massey 分差
         "form_diff",          # 状态分差
@@ -25,7 +26,7 @@ class FeatureBuilder:
         "squad_completeness_away",  # 客队阵容完整度
         "home_advantage",     # 主场优势系数
         "neutral",            # 是否中立场
-    ]
+    )
 
     def __init__(self):
         pass
@@ -37,22 +38,23 @@ class FeatureBuilder:
               form_home: dict, form_away: dict,
               h2h_stats: dict,
               squad_home: float, squad_away: float,
-              home_adv: float, neutral: bool) -> dict:
+              home_adv: float, neutral: bool,
+              massey_home: float = 0.0, massey_away: float = 0.0) -> dict:
         """构造特征字典 + numpy 向量"""
 
         features = {
             "elo_diff": elo_home - elo_away,
-            "massey_diff": 0.0,  # 后续填充
+            "massey_diff": massey_home - massey_away,
             "form_diff": form_home.get("form_score", 0.5) - form_away.get("form_score", 0.5),
             "home_attack": atk_home,
             "home_defense": def_home,
             "away_attack": atk_away,
             "away_defense": def_away,
-            "h2h_home_win_rate": h2h_stats.get("a_win_rate", 0.33),
-            "h2h_draw_rate": h2h_stats.get("draw_rate", 0.34),
+            "h2h_home_win_rate": h2h_stats.get("a_win_rate", 1.0 / 3.0),
+            "h2h_draw_rate": h2h_stats.get("draw_rate", 1.0 / 3.0),
             "h2h_avg_goals": h2h_stats.get("avg_goals", 2.7),
-            "home_ppg": form_home.get("ppg", 0.5),
-            "away_ppg": form_away.get("ppg", 0.5),
+            "home_ppg": form_home.get("ppg", 1.0 / 3.0),
+            "away_ppg": form_away.get("ppg", 1.0 / 3.0),
             "home_gd_avg": form_home.get("goal_diff_avg", 0.0),
             "away_gd_avg": form_away.get("goal_diff_avg", 0.0),
             "squad_completeness_home": squad_home,
