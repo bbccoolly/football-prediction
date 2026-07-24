@@ -1,6 +1,6 @@
 # 迭代 B：预测收口、数据治理与可信回测实施方案
 
-> 实施状态：PR 1 已于 2026-07-23 在 `codex/prediction-hardening` 完成并提交（`fdb535d`）；PR 2 已于 2026-07-23 在 `codex/match-repository` 完成并提交（`2a30404`）；PR 3 已在 `codex/prediction-service` 完成实现和最终验收；PR 4 尚未开始。本文档是迭代 B 的决策完整方案，实施时按连续、可独立审查的 PR 交付。
+> 实施状态：PR 1 已于 2026-07-23 在 `codex/prediction-hardening` 完成并提交（`fdb535d`）；PR 2 已于 2026-07-23 在 `codex/match-repository` 完成并提交（`2a30404`）；PR 3 已在 `codex/prediction-service` 完成实现和最终验收；PR 4 已在 `codex/walk-forward-backtest` 完成实现和验收，待提交审查。本文档是迭代 B 的决策完整方案。
 
 ## 1. 实施目标
 
@@ -25,7 +25,7 @@
 | PR 3 | `codex/prediction-service` | 共享预测服务、运行时快照和原子刷新 |
 | PR 4 | `codex/walk-forward-backtest` | 严格回测、指标报告和研究级准入清单 |
 
-PR 2、PR 3、PR 4 是串行依赖关系，必须按顺序审查和合并。当前 PR 3 验收通过后才能创建 PR 4。每个 PR 独立运行测试并使用中文提交说明。运行时数据库、历史数据、报告、权重和模型产物不得提交。
+PR 2、PR 3、PR 4 是串行依赖关系，必须按顺序审查和合并。四个 PR 均独立运行测试并使用中文提交说明。运行时数据库、历史数据、报告、权重和模型产物不得提交。
 
 ## 3. PR 1：预测与接口收口
 
@@ -497,6 +497,8 @@ fix: 原子刷新全部历史依赖模型
 
 ## 6. PR 4：可信 Walk-forward 与准入报告
 
+> 当前状态：严格时间批次回测、指标与配对 Bootstrap、研究级准入清单、离线 CLI 和 Web 后台任务均已实现并完成验收。当前 305 场数据库不满足正式数据门禁，6 个候选模型均保持 `research_only`；学习模型统一为 `not_evaluated`，线上权重未修改。
+
 ### 6.1 数据门禁与时间切分
 
 数据进入正式准入前必须满足：
@@ -509,10 +511,10 @@ fix: 原子刷新全部历史依赖模型
 按时间分割：
 
 - 最早 60%：初始训练。
-- 中间 20%：验证与概率校准。
+- 中间 20%：验证与稳定性诊断；本 PR 不做概率校准。
 - 最后 20%：冻结保留集。
 - 同一自然日不得跨越两个集合。
-- 验证集用于模型选择，不计入最终准入样本。
+- 候选模型和参数在运行前固定；验证集只用于覆盖率、稳定性和异常诊断，不计入最终准入样本。
 - 准入结论只依据冻结保留集。
 - 数据不足仍可生成报告，但状态只能是 `insufficient_data` 或 `research_only`。
 - 当前历史数据规模预计低于正式准入门槛，因此 PR 4 的完成标准是生成可信、可复现的研究报告，不预设会有模型获得 `admitted`。
@@ -566,14 +568,14 @@ XGBoost、神经网络和 Stacking 在没有合规时间点产物时标记 `not_
 
 - 模型与基线比较只使用双方均产生合法概率的样本交集。
 - 每个模型同时报告 `eligible_samples`、`valid_predictions` 和覆盖率。
-- 市场赔率仅使用 `captured_at` 不晚于预测时点且严格早于开赛时间的快照。
+- 市场赔率按公司选择 `captured_at` 严格早于开赛时间的最后一条快照；各公司分别去水后按结果概率取中位数并重新归一化，协议固定为 `market_consensus_v1`。
 - 不同模型不得使用各自不一致的样本集合后直接比较汇总指标。
 
 不确定性：
 
 - 按赛事和连续 7 天组成重采样块，在同一配对样本上重采样。
 - Bootstrap 2000 次，随机种子 42。
-- 输出均值、95% 区间和相对基线差值。
+- 准入主基线 `expanding_competition_rate` 输出均值、95% 区间和配对差值；其余基线输出相同配对样本上的点估计，避免重复重采样影响回测吞吐。
 
 ### 6.5 准入规则
 
@@ -610,6 +612,7 @@ XGBoost、神经网络和 Stacking 在没有合规时间点产物时标记 `not_
 python calibrate_cli.py backtest --database PATH
 python calibrate_cli.py backtest --fixture PATH
 python calibrate_cli.py backtest --fixture PATH --allow-insufficient-data
+python calibrate_cli.py backtest --fixture PATH --as-of 2027-01-01T00:00:00Z
 python calibrate_cli.py report --run-id ID
 python calibrate_cli.py admission --run-id ID
 ```
@@ -636,12 +639,12 @@ data/processed/backtests/<run_id>/
   admission.json
 ```
 
-`manifest.json` 必须记录 Git 提交、数据库指纹、数据范围、特征版本、参数版本、随机种子和运行时间。`status.json` 记录 PID、`queued|running|completed|failed|interrupted` 状态、开始与结束时间、退出码和错误摘要，并使用临时文件加 `os.replace()` 原子更新。
+`manifest.json` 必须记录 Git 提交、工作树状态、数据库与赔率指纹、数据范围、特征版本、参数版本、随机种子和运行时间。`status.json` 记录 PID、`queued|running|completed|failed|interrupted` 状态、开始与结束时间、退出码和错误摘要，并使用临时文件加 `os.replace()` 原子更新。退出码 `2` 对应 `completed + insufficient_data`，不是任务失败。
 
 ### 6.7 Web 校准任务迁移
 
 - `POST /api/calibrate/run` 启动 `calibrate_cli.py backtest --database <configured-path>`，不再直接运行旧 `calibrate.py`。
-- 接口在启动前生成 `run_id`，成功返回 `{"status":"started","run_id":"..."}`。
+- 接口在启动前生成 `run_id`，成功返回 HTTP 202 和 `{"status":"started","run_id":"..."}`。
 - `GET /api/calibrate/status?run_id=<id>` 和 `GET /api/calibrate/report?run_id=<id>` 查询指定运行；兼容无参数调用时读取最近一次运行。
 - 同一时刻只允许一个回测任务运行；重复启动返回 409 和当前 `run_id`。
 - 服务启动时扫描未结束的 `status.json`：进程仍存在则恢复查询，进程不存在则原子标记为 `interrupted`。
@@ -684,7 +687,7 @@ refactor: 统一校准命令行入口
 python -m compileall -q .
 pytest -q
 python scripts/migrate_history.py --source tests/fixtures/legacy_history.json
-python calibrate_cli.py backtest --fixture tests/fixtures/matches.json --allow-insufficient-data
+python calibrate_cli.py backtest --fixture tests/fixtures/backtest_matches.json --allow-insufficient-data --as-of 2027-01-01T00:00:00Z
 ```
 
 ### 7.3 浏览器验收

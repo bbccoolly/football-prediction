@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 from features.builder import FeatureBuilder
 from prediction.contracts import ModelArtifactMetadata
@@ -134,3 +135,58 @@ class ModelArtifactInspector:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             if digest != expected_hash.lower():
                 raise ValueError("artifact checksum mismatch")
+
+
+class FrozenArtifactInspector:
+    """An immutable manifest view captured once at backtest start."""
+
+    MODEL_IDS = ("xgboost", "neural_net", "stacking")
+
+    def __init__(self, inspections):
+        self._inspections = MappingProxyType(dict(inspections))
+
+    @classmethod
+    def capture(cls, root: str | Path):
+        inspector = ModelArtifactInspector(root)
+        cutoff = "9999-12-31T23:59:59+00:00"
+        return cls({model_id: inspector.inspect(model_id, cutoff) for model_id in cls.MODEL_IDS})
+
+    def inspect(self, model_id: str, as_of: str) -> ArtifactInspection:
+        inspection = self._inspections.get(model_id)
+        if inspection is None:
+            return ArtifactInspection(model_id, "artifact_missing", "metadata_missing")
+        metadata = inspection.metadata
+        if metadata is not None:
+            trained_until = datetime.fromisoformat(
+                metadata.trained_until.replace("Z", "+00:00")
+            )
+            cutoff = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+            if trained_until >= cutoff:
+                return ArtifactInspection(
+                    model_id,
+                    "invalid_artifact",
+                    "artifact trained_until must be before prediction cutoff",
+                )
+        return inspection
+
+    def public_inventory(self):
+        return {
+            model_id: {
+                "status": inspection.status,
+                "reason": inspection.reason,
+                "model_version": (
+                    inspection.metadata.model_version if inspection.metadata else None
+                ),
+                "feature_version": (
+                    inspection.metadata.feature_version if inspection.metadata else None
+                ),
+                "trained_until": (
+                    inspection.metadata.trained_until if inspection.metadata else None
+                ),
+                "files": (
+                    [dict(item) for item in inspection.metadata.files]
+                    if inspection.metadata else []
+                ),
+            }
+            for model_id, inspection in sorted(self._inspections.items())
+        }

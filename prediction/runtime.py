@@ -138,8 +138,8 @@ def _batch_matches(matches):
     return [grouped[key] for key in sorted(grouped)]
 
 
-def _build_rolling_knn(matches, feature_builder):
-    knn = KNNSimilarModel()
+def _build_rolling_knn_rows(matches, feature_builder):
+    rows = []
     prefix: list[dict] = []
     elo = EloRating(storage_path=os.devnull)
     form = FormModel()
@@ -176,7 +176,13 @@ def _build_rolling_knn(matches, feature_builder):
             )
             pending.append((features["vector"], match))
         for vector, match in pending:
-            knn.add_match(vector, match["home_goals"], match["away_goals"])
+            rows.append({
+                "match_id": match.get("match_id"),
+                "competition_id": match.get("competition_id"),
+                "features": tuple(float(value) for value in vector),
+                "home_goals": match["home_goals"],
+                "away_goals": match["away_goals"],
+            })
         for match in batch:
             elo.update(
                 match["home_team"], match["away_team"], match["home_goals"],
@@ -186,7 +192,60 @@ def _build_rolling_knn(matches, feature_builder):
         form.load_history(batch)
         h2h.load_history(batch)
         prefix.extend(batch)
+    return tuple(rows)
+
+
+def _knn_from_rows(rows):
+    knn = KNNSimilarModel()
+    for row in rows:
+        knn.add_match(row["features"], row["home_goals"], row["away_goals"])
     return knn
+
+
+def _build_rolling_knn(matches, feature_builder):
+    return _knn_from_rows(_build_rolling_knn_rows(matches, feature_builder))
+
+
+class HistoricalFeatureIndex:
+    """Precomputed, leakage-safe KNN training rows for monotonic cutoffs."""
+
+    def __init__(self, rows_by_competition, data_fingerprint):
+        self.rows_by_competition = MappingProxyType({
+            key: tuple(value) for key, value in rows_by_competition.items()
+        })
+        self.data_fingerprint = data_fingerprint
+        self.feature_version = FeatureBuilder.FEATURE_VERSION
+
+    @classmethod
+    def build(cls, matches, feature_builder=None):
+        feature_builder = feature_builder or FeatureBuilder()
+        grouped: dict[str, list[dict]] = defaultdict(list)
+        for match in matches:
+            grouped[match["competition_id"]].append(match)
+        rows = {
+            competition_id: _build_rolling_knn_rows(scoped, feature_builder)
+            for competition_id, scoped in grouped.items()
+        }
+        payload = [{
+            key: match.get(key)
+            for key in (
+                "match_id", "competition_id", "event_date", "kickoff_utc",
+                "time_precision", "home_team_id", "away_team_id",
+                "home_goals", "away_goals", "neutral",
+            )
+        } for match in matches]
+        return cls(rows, fingerprint({
+            "feature_version": FeatureBuilder.FEATURE_VERSION,
+            "matches": payload,
+        }))
+
+    def rows_for(self, competition_id, matches):
+        match_ids = {match["match_id"] for match in matches}
+        return tuple(
+            row
+            for row in self.rows_by_competition.get(competition_id, ())
+            if row["match_id"] in match_ids
+        )
 
 
 @dataclass(frozen=True)
@@ -204,14 +263,27 @@ class RefreshResult:
 
 
 class ModelRuntimeBuilder:
-    def __init__(self, repository: MatchRepository, artifact_root: str | Path = MODEL_DIR):
+    def __init__(
+        self,
+        repository: MatchRepository,
+        artifact_root: str | Path = MODEL_DIR,
+        *,
+        artifact_inspector=None,
+        historical_feature_index: HistoricalFeatureIndex | None = None,
+        code_commit: str | None = None,
+    ):
         self.repository = repository
         self.feature_builder = FeatureBuilder()
-        self.artifact_inspector = ModelArtifactInspector(artifact_root)
+        self.artifact_inspector = artifact_inspector or ModelArtifactInspector(artifact_root)
+        self.historical_feature_index = historical_feature_index
+        self.code_commit = code_commit
 
     def build(self, as_of: datetime | str | None = None) -> ModelRuntimeSnapshot:
         cutoff = _iso(as_of or utc_now())
-        matches = self.repository.list_matches({"status": "finished"}, as_of=cutoff)
+        training_filters = {
+            "status": "finished", "data_quality_status": "valid",
+        }
+        matches = self.repository.list_matches(training_filters, as_of=cutoff)
         valid = [
             match for match in matches
             if match.get("home_team_type") == match.get("away_team_type")
@@ -221,14 +293,14 @@ class ModelRuntimeBuilder:
             raise RuntimeNotReadyError("预测运行时没有可用的完场比赛")
 
         data_fingerprint = self.repository.build_data_fingerprint(
-            {"status": "finished"}, as_of=cutoff
+            training_filters, as_of=cutoff
         )
         team_type_models = self._build_team_type_models(valid)
         competition_models = self._build_competition_models(valid)
         weights = dict(INITIAL_WEIGHTS)
         weights["monte_carlo"] = 0.0
         weights_fingerprint = fingerprint(weights)
-        code_commit = os.environ.get("FOOTBALL_CODE_COMMIT", "unknown")
+        code_commit = self.code_commit or os.environ.get("FOOTBALL_CODE_COMMIT", "unknown")
         model_parameters = {
             "elo": {
                 "initial": ELO_INITIAL, "k": ELO_K,
@@ -361,7 +433,11 @@ class ModelRuntimeBuilder:
             poisson = PoissonModel(name); poisson.set_team_strengths(strengths)
             dixon = DixonColesModel(name); dixon.set_team_strengths(strengths)
             massey = MasseyRanking(); massey.fit(scoped)
-            knn = _build_rolling_knn(scoped, self.feature_builder)
+            if self.historical_feature_index is not None:
+                knn_rows = self.historical_feature_index.rows_for(competition_id, scoped)
+                knn = _knn_from_rows(knn_rows)
+            else:
+                knn = _build_rolling_knn(scoped, self.feature_builder)
             result[competition_id] = CompetitionRuntime(
                 competition_id=competition_id,
                 competition_name=name,
@@ -514,7 +590,8 @@ class RuntimeManager:
             update_result = update_operation() if update_operation else None
             snapshot = self.builder.build()
             current_fingerprint = self.builder.repository.build_data_fingerprint(
-                {"status": "finished"}, as_of=snapshot.data_as_of
+                {"status": "finished", "data_quality_status": "valid"},
+                as_of=snapshot.data_as_of,
             )
             if current_fingerprint != snapshot.data_fingerprint:
                 raise RuntimeError("database_changed_during_runtime_build")
@@ -560,7 +637,8 @@ class RuntimeManager:
         stale = snapshot is None
         try:
             database_fingerprint = self.builder.repository.build_data_fingerprint(
-                {"status": "finished"}, as_of=_iso(utc_now())
+                {"status": "finished", "data_quality_status": "valid"},
+                as_of=_iso(utc_now()),
             )
             stale = snapshot is None or database_fingerprint != snapshot.data_fingerprint
         except Exception:
@@ -573,3 +651,13 @@ class RuntimeManager:
             "snapshot": snapshot.public_metadata() if snapshot else None,
             "last_refresh_error": last_error,
         }
+
+
+class FixedRuntimeProvider:
+    """Read-only provider used by historical prediction batches."""
+
+    def __init__(self, snapshot: ModelRuntimeSnapshot):
+        self._snapshot = snapshot
+
+    def current(self):
+        return self._snapshot

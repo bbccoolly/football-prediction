@@ -1,11 +1,13 @@
 import hashlib
 import json
+import pickle
 from datetime import datetime, timedelta, timezone
 
+import joblib
 import pytest
 
 from features.builder import FeatureBuilder
-from prediction.artifacts import ModelArtifactInspector
+from prediction.artifacts import FrozenArtifactInspector, ModelArtifactInspector
 
 
 def _metadata(cutoff, path, digest):
@@ -52,6 +54,37 @@ def test_valid_manifest_is_checked_but_not_loaded(tmp_path):
 
     assert result.status == "disabled_pending_admission"
     assert result.metadata.model_id == "xgboost"
+
+
+def test_frozen_inspector_does_not_rescan_or_deserialize_artifacts(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "xgboost"
+    model_dir.mkdir()
+    payload = model_dir / "classifier.json"
+    payload.write_text("{}", encoding="utf-8")
+    cutoff = datetime.now(timezone.utc)
+    metadata = _metadata(
+        cutoff, payload.name, hashlib.sha256(payload.read_bytes()).hexdigest()
+    )
+    manifest = model_dir / "metadata.json"
+    manifest.write_text(json.dumps(metadata), encoding="utf-8")
+
+    def fail_deserialization(*args, **kwargs):
+        raise AssertionError("model payload must not be deserialized")
+
+    monkeypatch.setattr(pickle, "load", fail_deserialization)
+    monkeypatch.setattr(joblib, "load", fail_deserialization)
+    inspector = FrozenArtifactInspector.capture(tmp_path)
+    captured = inspector.inspect("xgboost", cutoff.isoformat())
+
+    manifest.write_text("{invalid", encoding="utf-8")
+    payload.unlink()
+    frozen = inspector.inspect("xgboost", cutoff.isoformat())
+
+    assert captured.status == "disabled_pending_admission"
+    assert frozen == captured
+    assert inspector.public_inventory()["xgboost"]["files"] == metadata["files"]
 
 
 def test_manifest_path_cannot_escape_model_directory(tmp_path):

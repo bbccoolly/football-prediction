@@ -13,11 +13,18 @@ from .contracts import (
     RuntimeRefreshInProgressError,
     SnapshotTimeMismatchError,
 )
-from .runtime import ModelRuntimeBuilder, RuntimeManager
+from .runtime import (
+    FixedRuntimeProvider,
+    HistoricalFeatureIndex,
+    ModelRuntimeBuilder,
+    RuntimeManager,
+)
 from .service import PredictionService
 
 __all__ = [
     "InvalidPredictionRequestError",
+    "FixedRuntimeProvider",
+    "HistoricalFeatureIndex",
     "ModelArtifactMetadata",
     "ModelExecutionError",
     "ModelRuntimeBuilder",

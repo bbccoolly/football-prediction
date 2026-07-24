@@ -1,9 +1,12 @@
+import os
 import threading
 import time
 
 import pytest
 
 import web.app as web_app
+from backtest.tasks import BacktestTaskStore
+from backtest.storage import atomic_write_json, atomic_write_text
 from data.match_repository import MatchRepository
 from data.source_adapters import adapt_fifa_match
 from ensemble.prediction_contract import NoAvailableModelsError
@@ -338,13 +341,60 @@ def test_real_prediction_exposes_runtime_metadata(monkeypatch, tmp_path):
     assert upcoming["competition_id"] == "bundesliga"
 
 
-def test_calibration_run_is_disabled(client, monkeypatch):
+def test_calibration_run_starts_persistent_background_task(client, monkeypatch, tmp_path):
     monkeypatch.setenv("FOOTBALL_ADMIN_TOKEN", "expected-token")
+    store = BacktestTaskStore(tmp_path / "backtests")
+    monkeypatch.setattr(web_app, "_backtest_store", store)
+    run_ids = iter(("bt-web-first", "bt-web-second"))
+    monkeypatch.setattr(web_app, "create_run_id", lambda: next(run_ids))
+    calls = []
+
+    class Process:
+        pid = os.getpid()
+
+    def popen(command, **options):
+        calls.append((command, options))
+        return Process()
+
+    monkeypatch.setattr(web_app.subprocess, "Popen", popen)
 
     response = client.post(
         "/api/calibrate/run",
         headers={"Authorization": "Bearer expected-token"},
     )
 
-    assert response.status_code == 503
-    assert response.get_json()["error_code"] == "CALIBRATION_DISABLED_PENDING_BACKTEST"
+    assert response.status_code == 202
+    assert response.get_json()["run_id"] == "bt-web-first"
+    assert calls[0][1]["shell"] is False
+    assert store.read_status("bt-web-first")["state"] == "running"
+
+    conflict = client.post(
+        "/api/calibrate/run",
+        headers={"Authorization": "Bearer expected-token"},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.get_json()["error_code"] == "BACKTEST_ALREADY_RUNNING"
+
+
+def test_completed_backtest_report_is_loaded_by_run_id(client, monkeypatch, tmp_path):
+    store = BacktestTaskStore(tmp_path / "backtests")
+    monkeypatch.setattr(web_app, "_backtest_store", store)
+    run_id = "bt-completed"
+    store.reserve(run_id)
+    run_dir = store.run_dir(run_id)
+    atomic_write_json(run_dir / "manifest.json", {"run_id": run_id})
+    atomic_write_json(run_dir / "metrics.json", {"holdout": {}})
+    atomic_write_json(run_dir / "admission.json", {"decisions": {}})
+    atomic_write_text(run_dir / "report.md", "# 报告\n")
+    store.complete(run_id, 2, "insufficient_data")
+    store.release(run_id)
+
+    response = client.get(f"/api/calibrate/report?run_id={run_id}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["run"]["outcome"] == "insufficient_data"
+    assert "pid" not in payload["run"]
+    assert payload["manifest"]["run_id"] == run_id
+    assert payload["report_markdown"] == "# 报告\n"

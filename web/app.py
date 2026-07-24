@@ -1,6 +1,7 @@
-import sys, os, json, math, time, threading, hmac
+import sys, os, json, math, time, threading, hmac, subprocess, re
 from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
@@ -10,6 +11,8 @@ from ensemble.prediction_contract import NoAvailableModelsError
 from config import *
 from data.history_db import load_history
 from data.match_repository import DEFAULT_DATABASE_PATH, MatchRepository
+from backtest.storage import create_run_id
+from backtest.tasks import BacktestAlreadyRunningError, BacktestTaskStore
 from prediction import (
     InvalidPredictionRequestError,
     ModelExecutionError,
@@ -22,6 +25,9 @@ from prediction import (
 )
 
 app = Flask(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKTEST_ROOT = (PROJECT_ROOT / "data/processed/backtests").resolve()
+_backtest_store = BacktestTaskStore(BACKTEST_ROOT)
 
 # ---- 竞彩投注引擎 ----
 from betting.jczq_engine import JczqEngine
@@ -54,6 +60,11 @@ _prediction_service = None
 
 def _configured_database_path():
     return os.path.abspath(os.environ.get("FOOTBALL_DB_PATH", str(DEFAULT_DATABASE_PATH)))
+
+
+def _recover_backtest_tasks():
+    """Mark abandoned background runs without touching model state."""
+    return _backtest_store.recover()
 
 
 def _ensure_runtime_components():
@@ -677,11 +688,7 @@ def api_betting_matches():
 
 @app.route("/api/calibration")
 def api_calibration():
-    return jsonify({
-        "status": "unavailable",
-        "error_code": "CALIBRATION_DISABLED_PENDING_BACKTEST",
-        "message": "可信回测完成前不加载旧校准结果",
-    })
+    return _backtest_report_response(completed_only=True)
 
 @app.route("/api/rankings")
 def api_rankings():
@@ -794,8 +801,59 @@ def api_sync_fifa():
         print(f"[FIFA] 同步失败: {e}")
         return _api_error("FIFA 数据同步失败", "FIFA_SYNC_FAILED", 500)
 
-# ========== 校准系统 Web 界面 ==========
-_calibration_state = {"running": False, "progress": 0, "message": "", "report": None, "weights": None, "total": 0}
+# ========== Walk-forward 回测与模型准入 ==========
+_BACKTEST_RUN_ID = re.compile(r"bt-[A-Za-z0-9._-]+$")
+
+
+def _requested_backtest_run_id(completed_only=False):
+    run_id = str(request.args.get("run_id") or "").strip()
+    if run_id and not _BACKTEST_RUN_ID.fullmatch(run_id):
+        return None, _api_error("run_id 格式无效", "INVALID_BACKTEST_RUN_ID", 400)
+    if not run_id:
+        run_id = _backtest_store.latest_run_id(completed_only=completed_only)
+    if not run_id:
+        return None, _api_error("尚无回测运行", "BACKTEST_RUN_NOT_FOUND", 404)
+    return run_id, None
+
+
+def _public_backtest_status(status):
+    return {
+        key: status.get(key)
+        for key in (
+            "run_id", "state", "outcome", "queued_at", "started_at",
+            "heartbeat_at", "finished_at", "exit_code", "progress", "error",
+        )
+    }
+
+
+def _backtest_report_response(completed_only=False):
+    run_id, error = _requested_backtest_run_id(completed_only=completed_only)
+    if error:
+        return error
+    status = _backtest_store.read_status(run_id)
+    if not status:
+        return _api_error("回测运行不存在", "BACKTEST_RUN_NOT_FOUND", 404)
+    if status.get("state") != "completed":
+        return _api_error(
+            "回测报告尚未完成", "BACKTEST_REPORT_NOT_READY", 409,
+            {"run_id": run_id, "state": status.get("state")},
+        )
+    run_dir = _backtest_store.run_dir(run_id)
+    try:
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+        admission = json.loads((run_dir / "admission.json").read_text(encoding="utf-8"))
+        report_markdown = (run_dir / "report.md").read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        return _api_error("回测报告文件损坏", "BACKTEST_REPORT_INVALID", 500)
+    return jsonify({
+        "status": "ok",
+        "run": _public_backtest_status(status),
+        "manifest": manifest,
+        "metrics": metrics,
+        "admission": admission,
+        "report_markdown": report_markdown,
+    })
 
 @app.route("/rankings")
 def rankings_page():
@@ -809,11 +867,53 @@ def calibrate_page():
 @app.route("/api/calibrate/run", methods=["POST"])
 @_admin_required
 def api_calibrate_run():
-    return _api_error(
-        "可信回测完成前校准功能暂不可用",
-        "CALIBRATION_DISABLED_PENDING_BACKTEST",
-        503,
-    )
+    _recover_backtest_tasks()
+    run_id = create_run_id()
+    try:
+        _backtest_store.reserve(run_id)
+    except BacktestAlreadyRunningError as exc:
+        return _api_error(
+            "已有回测任务正在运行", "BACKTEST_ALREADY_RUNNING", 409,
+            {"run_id": exc.run_id},
+        )
+    run_dir = _backtest_store.run_dir(run_id)
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "calibrate_cli.py"),
+        "backtest",
+        "--database", _configured_database_path(),
+        "--as-of", datetime.now(timezone.utc).isoformat(),
+        "--run-id", run_id,
+        "--output-root", str(_backtest_store.root),
+    ]
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with (run_dir / "stdout.log").open("a", encoding="utf-8") as stdout_handle, (
+            run_dir / "stderr.log"
+        ).open("a", encoding="utf-8") as stderr_handle:
+            popen_options = {
+                "cwd": PROJECT_ROOT,
+                "stdout": stdout_handle,
+                "stderr": stderr_handle,
+                "shell": False,
+                "env": {**os.environ, "PYTHONUNBUFFERED": "1"},
+            }
+            if os.name == "nt":
+                popen_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                popen_options["start_new_session"] = True
+            process = subprocess.Popen(command, **popen_options)
+        status = _backtest_store.read_status(run_id) or {}
+        if status.get("state") in {"queued", "running"}:
+            _backtest_store.claim(run_id, process.pid)
+    except Exception:
+        _backtest_store.fail(run_id, "BACKTEST_START_FAILED", "后台回测启动失败")
+        _backtest_store.release(run_id)
+        return _api_error("后台回测启动失败", "BACKTEST_START_FAILED", 500)
+    return jsonify({
+        "status": "started", "run_id": run_id,
+        "message": "Walk-forward 回测已启动",
+    }), 202
 def _lottery_prediction(lottery_key, force_refresh=False):
     from lottery_fetcher import fetch_lottery
     from lottery_predictor import full_analysis
@@ -854,20 +954,17 @@ def api_lottery_predict_refresh(lottery_key):
     )
 @app.route("/api/calibrate/status")
 def api_calibrate_status():
-    return jsonify({
-        "status": "unavailable",
-        "error_code": "CALIBRATION_DISABLED_PENDING_BACKTEST",
-        "progress": 0,
-        "done": True,
-    })
+    run_id, error = _requested_backtest_run_id()
+    if error:
+        return error
+    status = _backtest_store.read_status(run_id)
+    if not status:
+        return _api_error("回测运行不存在", "BACKTEST_RUN_NOT_FOUND", 404)
+    return jsonify({"status": "ok", "run": _public_backtest_status(status)})
 
 @app.route("/api/calibrate/report")
 def api_calibrate_report():
-    return _api_error(
-        "可信回测报告尚未生成",
-        "CALIBRATION_DISABLED_PENDING_BACKTEST",
-        404,
-    )
+    return _backtest_report_response()
 
 # ========== 彩票开奖查询 ==========
 from lottery_fetcher import fetch_all as _fetch_all_lottery

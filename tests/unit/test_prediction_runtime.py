@@ -11,7 +11,7 @@ from prediction.contracts import (
     RuntimeRefreshInProgressError,
     SnapshotTimeMismatchError,
 )
-from prediction.runtime import _batch_matches, _build_rolling_knn
+from prediction.runtime import HistoricalFeatureIndex, _batch_matches, _build_rolling_knn
 
 
 def _repository_with_matches(tmp_path, count=8):
@@ -145,6 +145,36 @@ def test_runtime_excludes_matches_at_or_after_as_of(tmp_path):
 
     assert snapshot.training_sample_count == 4
     assert snapshot.trained_until == "2026-06-04"
+
+
+def test_historical_feature_index_matches_uncached_knn(tmp_path):
+    repository = _repository_with_matches(tmp_path)
+    matches = repository.list_matches({
+        "status": "finished", "data_quality_status": "valid",
+    })
+    feature_index = HistoricalFeatureIndex.build(matches)
+    cutoff = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    uncached = ModelRuntimeBuilder(
+        repository, artifact_root=tmp_path / "models"
+    ).build(cutoff)
+    cached = ModelRuntimeBuilder(
+        repository, artifact_root=tmp_path / "models",
+        historical_feature_index=feature_index,
+    ).build(cutoff)
+
+    uncached_rows = uncached.competition_models["bundesliga"].models[
+        "knn_similar"
+    ].match_features
+    cached_rows = cached.competition_models["bundesliga"].models[
+        "knn_similar"
+    ].match_features
+
+    assert cached.snapshot_id == uncached.snapshot_id
+    assert len(cached_rows) == len(uncached_rows)
+    for cached_row, uncached_row in zip(cached_rows, uncached_rows):
+        assert cached_row["features"] == pytest.approx(uncached_row["features"])
+        assert cached_row["home_goals"] == uncached_row["home_goals"]
+        assert cached_row["away_goals"] == uncached_row["away_goals"]
 
 
 def test_minimum_evidence_does_not_promote_default_features(tmp_path):

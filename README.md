@@ -50,7 +50,7 @@ python run.py
 
 浏览器打开 **http://127.0.0.1:5000**
 
-刷新数据、FIFA 同步和彩票强制刷新需要管理令牌；校准入口在可信回测完成前保持禁用：
+刷新数据、FIFA 同步、后台回测和彩票强制刷新需要管理令牌：
 
 ```powershell
 $env:FOOTBALL_ADMIN_TOKEN = "your-secret-token"
@@ -142,6 +142,12 @@ football-prediction/
 │   ├── runtime.py                #   分域模型快照与原子刷新
 │   └── service.py                #   Web / CLI 共用预测入口
 │
+├── backtest/                     # 可信 Walk-forward 回测
+│   ├── runner.py                 #   严格时间批次执行器
+│   ├── metrics.py                #   配对指标与分块 Bootstrap
+│   ├── admission.py              #   模型准入门禁
+│   └── tasks.py                  #   后台任务状态与恢复
+│
 ├── betting/                      # 竞彩投注
 │   ├── jczq_engine.py            #   投注分析引擎
 │   ├── jczq_planner.py           #   投注方案规划
@@ -149,8 +155,8 @@ football-prediction/
 │   └── jczq_team_db.py           #   球队数据
 │
 ├── config.py                     # 全局配置（15 联赛 · 128 球队 · 算法参数）
-├── calibrate.py                  # 旧校准实现（不作为可信准入依据）
-├── calibrate_cli.py              # 旧校准工具（等待 PR 4 替换）
+├── calibrate.py                  # 新回测 CLI 的弃用兼容入口
+├── calibrate_cli.py              # 离线回测、报告与准入命令行
 ├── lottery_predictor.py          # 彩票预测（大乐透/排三/排五/七星彩）
 ├── lottery_fetcher.py            # 彩票数据抓取
 ├── main.py                       # CLI 主入口
@@ -164,17 +170,24 @@ football-prediction/
 └── .gitignore
 ```
 
-## 模型校准
+## 回测与模型准入
 
 项目的分阶段优化、测试门禁和模型准入规范见 [优化路线图](docs/optimization-roadmap.md)。
 
 PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1` 和权重指纹。旧 `ensemble/weights.json`、旧校准报告及旧 pickle 产物不会被运行时加载。
 
-在 PR 4 完成严格 Walk-forward、保留集评估和模型准入前：
+可信回测严格按自然日和开赛时间分批，只使用批次开始前的数据。默认输出到被 Git 忽略的 `data/processed/backtests/<run_id>/`：
 
-- `POST /api/calibrate/run` 返回 `503 CALIBRATION_DISABLED_PENDING_BACKTEST`。
-- `GET /api/calibration` 和旧校准状态接口只返回不可用状态。
-- 不应将 `calibrate.py` 或 `calibrate_cli.py` 的旧结果用于生产权重或模型准入。
+```powershell
+python calibrate_cli.py backtest --database data/processed/football.db
+python calibrate_cli.py backtest --fixture tests/fixtures/backtest_matches.json --allow-insufficient-data --as-of 2027-01-01T00:00:00Z
+python calibrate_cli.py report --run-id <run_id>
+python calibrate_cli.py admission --run-id <run_id>
+```
+
+退出码 `0` 表示完成，`1` 表示配置或执行失败，`2` 表示报告已完成但正式数据门禁不足。当前本地历史规模低于 1500 场，正常结果应是 `research_only` 或 `insufficient_data`，不能据此启用模型。
+
+回测不会联网、训练学习模型或写入线上权重。XGBoost、神经网络和 Stacking 在本阶段统一为 `not_evaluated`；任何线上权重调整仍需独立审查。
 
 ## 数据来源
 
@@ -198,10 +211,10 @@ PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1
 | `/api/refresh_data` | POST | 刷新线上数据（管理令牌） |
 | `/api/status` | GET | 数据、活动快照、模型状态和刷新状态 |
 | `/api/progress/<id>` | SSE | 预测进度推送 |
-| `/api/calibration` | GET | 校准不可用状态（等待 PR 4） |
-| `/api/calibrate/run` | POST | 暂时返回 503（管理令牌） |
-| `/api/calibrate/status` | GET | 校准不可用状态 |
-| `/api/calibrate/report` | GET | 暂无可信校准报告 |
+| `/api/calibration` | GET | 最近一次已完成的回测报告 |
+| `/api/calibrate/run` | POST | 启动后台 Walk-forward 回测（管理令牌） |
+| `/api/calibrate/status` | GET | 按 run ID 查询持久化任务状态 |
+| `/api/calibrate/report` | GET | 按 run ID 查询指标和准入报告 |
 | `/api/rankings` | GET | ELO 世界排名 |
 | `/api/wc_matches` | GET | 世界杯赛果 |
 | `/api/sync_fifa` | POST | 同步 FIFA 数据（管理令牌） |
@@ -216,7 +229,7 @@ PR 3 冻结使用 `INITIAL_WEIGHTS`，快照会报告 `weights_source=builtin_v1
 | `/api/lottery/predict/<key>` | POST | 重新生成彩票分析（管理令牌） |
 | `/history` | GET | 历史记录页面 |
 | `/betting` | GET | 竞彩投注页面 |
-| `/calibrate` | GET | 校准页面 |
+| `/calibrate` | GET | 回测与模型准入页面 |
 | `/lottery` | GET | 彩票页面 |
 
 `/predict` 返回 `model_agreement`（模型一致度）、`model_summary`（独立模型可用数量）、`simulation`（融合后的蒙特卡洛派生分布）、证据排除原因和训练数据质量；同时返回 `prediction_run_id`、运行时快照 ID、数据/配置/权重指纹、特征版本及模型训练元数据。旧字段 `confidence`、`ensemble.weights` 和 `predictions.monte_carlo` 暂时保留兼容。

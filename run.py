@@ -34,11 +34,14 @@ def main():
     if ROOT_DIR not in sys.path:
         sys.path.insert(0, ROOT_DIR)
 
-    from web.app import app, _init_models
+    from web.app import app, _init_models, _recover_backtest_tasks
 
     host, port = server_config()
     print("Initializing models...")
     _init_models()
+    interrupted = _recover_backtest_tasks()
+    if interrupted:
+        print(f"[Backtest] marked interrupted: {', '.join(interrupted)}")
     print("Models ready.")
 
     print(f"Starting on http://{host}:{port}")

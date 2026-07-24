@@ -157,6 +157,22 @@ class MatchRepository:
             raise
         return connection
 
+    def backup_to(self, destination: str | os.PathLike[str]):
+        """Create a transactionally consistent SQLite snapshot."""
+        target_path = Path(destination).resolve()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        source = self._connection()
+        target = sqlite3.connect(target_path)
+        try:
+            source.backup(target)
+            target.execute("PRAGMA foreign_keys = ON")
+            self._validate_schema(target)
+        finally:
+            target.close()
+            if self.database_path != ":memory:":
+                source.close()
+        return target_path
+
     def _seed_reference_data(self, connection):
         if not self.aliases_path.exists():
             raise RepositoryError(f"球队别名种子不存在: {self.aliases_path}")
@@ -687,6 +703,9 @@ class MatchRepository:
         if filters.get("team_type"):
             clauses.append("ht.team_type=? AND at.team_type=?")
             parameters.extend([filters["team_type"], filters["team_type"]])
+        if filters.get("data_quality_status"):
+            clauses.append("m.data_quality_status=?")
+            parameters.append(filters["data_quality_status"])
         if as_of:
             cutoff_timestamp = normalize_timestamp(as_of)
             cutoff_date = cutoff_timestamp[:10]
@@ -701,7 +720,22 @@ class MatchRepository:
                 f"""
                 SELECT m.*, ht.canonical_name AS home_team, at.canonical_name AS away_team,
                        ht.team_type AS home_team_type, at.team_type AS away_team_type,
-                       c.canonical_name AS league
+                       c.canonical_name AS league,
+                       (
+                           SELECT COUNT(DISTINCT sr.source)
+                           FROM match_sources ms
+                           JOIN source_records sr ON sr.source_record_pk=ms.source_record_pk
+                           WHERE ms.match_id=m.match_id
+                       ) AS source_count,
+                       (
+                           SELECT GROUP_CONCAT(source, ',') FROM (
+                               SELECT DISTINCT sr.source AS source
+                               FROM match_sources ms
+                               JOIN source_records sr ON sr.source_record_pk=ms.source_record_pk
+                               WHERE ms.match_id=m.match_id
+                               ORDER BY sr.source
+                           )
+                       ) AS sources
                 FROM matches m
                 JOIN teams ht ON ht.team_id=m.home_team_id
                 JOIN teams at ON at.team_id=m.away_team_id
@@ -799,19 +833,51 @@ class MatchRepository:
             if self.database_path != ":memory:":
                 connection.close()
 
-    def get_pre_match_odds(self, match_id: str, before: str):
+    def get_pre_match_odds(self, match_id: str, before: str, *, inclusive=True):
         connection = self._connection()
         try:
             cutoff = normalize_timestamp(before)
+            operator = "<=" if inclusive else "<"
             row = connection.execute(
-                """
+                f"""
                 SELECT * FROM odds_snapshots
-                WHERE match_id=? AND captured_at<=?
-                ORDER BY captured_at DESC LIMIT 1
+                WHERE match_id=? AND captured_at{operator}?
+                ORDER BY captured_at DESC, company, odds_snapshot_id LIMIT 1
                 """,
                 (match_id, cutoff),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            if self.database_path != ":memory:":
+                connection.close()
+
+    def list_latest_pre_match_odds(self, match_id: str, before: str):
+        """Return one deterministic, strictly pre-cutoff snapshot per company."""
+        connection = self._connection()
+        try:
+            cutoff = normalize_timestamp(before)
+            rows = connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY company
+                        ORDER BY captured_at DESC, odds_snapshot_id
+                    ) AS row_number
+                    FROM odds_snapshots
+                    WHERE match_id=? AND captured_at<?
+                )
+                SELECT * FROM ranked
+                WHERE row_number=1
+                ORDER BY company, odds_snapshot_id
+                """,
+                (match_id, cutoff),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item.pop("row_number", None)
+                result.append(item)
+            return result
         finally:
             if self.database_path != ":memory:":
                 connection.close()
